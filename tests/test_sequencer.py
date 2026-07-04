@@ -61,6 +61,38 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(seq.parse("W4NYA K1ABC 73").kind, seq.K_73)
 
 
+class ParseWsprTests(unittest.TestCase):
+    """WSPR is 'CALL GRID DBM', not an FT8 exchange, and must not be read by
+    parse() (which would mistake the grid for the sender's callsign)."""
+
+    def test_standard_wspr(self):
+        pm = seq.parse_wspr("W4NYA FM18 37")
+        self.assertEqual(pm.de, "W4NYA")
+        self.assertEqual(pm.grid, "FM18")
+        self.assertEqual(pm.to, "")          # no addressee: not directed at us
+        self.assertFalse(pm.is_cq)
+
+    def test_ft8_parse_would_misread_the_grid_as_a_call(self):
+        # Guards the exact bug this parser exists to avoid.
+        self.assertEqual(seq.parse("W4NYA FM18 37").de, "FM18")
+        self.assertEqual(seq.parse_wspr("W4NYA FM18 37").de, "W4NYA")
+
+    def test_type2_call_only(self):
+        pm = seq.parse_wspr("PJ4/K1ABC")
+        self.assertEqual(pm.de, "PJ4/K1ABC")
+        self.assertEqual(pm.grid, "")
+
+    def test_hashed_call_strips_brackets(self):
+        pm = seq.parse_wspr("<PJ4/K1ABC> FK52")
+        self.assertEqual(pm.de, "PJ4/K1ABC")
+        self.assertEqual(pm.grid, "FK52")
+
+    def test_empty(self):
+        pm = seq.parse_wspr("")
+        self.assertEqual(pm.de, "")
+        self.assertEqual(pm.grid, "")
+
+
 class CqAnsweredTests(unittest.TestCase):
     """We call CQ; a station answers. The regression the user hit: clicking
     the answer must send a *report*, not our own grid back."""

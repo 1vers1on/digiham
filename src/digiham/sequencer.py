@@ -187,6 +187,26 @@ def parse(raw: str) -> ParsedMessage:
     return pm
 
 
+def parse_wspr(raw: str) -> ParsedMessage:
+    """Parse a WSPR beacon message, which is *not* an FT8 exchange.
+
+    A WSPR message is ``CALL GRID DBM`` (type 1), e.g. ``W4NYA FM18 37``, so
+    it must not go through :func:`parse` — that reads it as a directed FT8
+    message and mistakes the grid for the sender's callsign. Here the first
+    token is the callsign, an optional Maidenhead grid follows, and the last
+    token is the transmit power in dBm. Type-2/3 messages (compound or hashed
+    calls) degrade gracefully to just the callsign.
+    """
+    toks = raw.upper().split()
+    pm = ParsedMessage(raw=raw, kind=K_FREE)
+    if not toks:
+        return pm
+    pm.de = toks[0].strip("<>")
+    if len(toks) >= 2 and is_grid(toks[1]):
+        pm.grid = toks[1]
+    return pm
+
+
 # --- standard message generation ----------------------------------------
 
 def standard_messages(mycall: str, mygrid: str, dxcall: str,

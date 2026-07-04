@@ -655,7 +655,11 @@ class RadioEngine(QObject):
     def _decode_window(self) -> tuple[float, float]:
         if self.mode == "WSPR":
             return 1400.0, 1600.0
-        return float(self.cfg.freq_min), float(self.cfg.freq_max)
+        # Tolerate a config with min/max set the wrong way round (nothing stops
+        # the user, or a hand-edited file, from doing so) rather than handing
+        # the decoder an inverted, empty search window.
+        lo, hi = self.cfg.freq_min, self.cfg.freq_max
+        return float(min(lo, hi)), float(max(lo, hi))
 
     def _pump_jobs(self) -> None:
         while self._jobq and not self.decoder.busy:
@@ -694,7 +698,8 @@ class RadioEngine(QObject):
 
     def _make_row(self, r, cycle: int, cstart: float, worked: set,
                   worked_dxcc: set, worked_grids: set) -> DecodeRow:
-        pm = seq.parse(r.message)
+        pm = seq.parse_wspr(r.message) if self.mode == "WSPR" \
+            else seq.parse(r.message)
         rf = self.dial_hz + r.freq
         de_base = seq.base_call(pm.de) if pm.de else ""
         dist = bearing = None

@@ -635,6 +635,9 @@ class MainWindow(QMainWindow):
             self.cfg.rig_enabled = True
             self.engine.connect_rig()
         else:
+            # Remember the deliberate disconnect so the rig doesn't silently
+            # auto-connect again on the next launch.
+            self.cfg.rig_enabled = False
             self.engine.disconnect_rig()
 
     def _set_dx(self) -> None:
