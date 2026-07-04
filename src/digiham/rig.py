@@ -4,24 +4,34 @@ All socket traffic runs on a dedicated worker thread so a slow or wedged
 rig never blocks the GUI. The GUI drives it through queued signals and
 receives state back through Qt signals.
 
+Each poll reports frequency/mode/PTT plus whichever meters the rig
+supports (discovered once at connect): S-meter while receiving, SWR /
+power / ALC while transmitting, supply voltage always.
+
 Split operation, as WSJT-X uses it, keeps the transmitted audio tone in a
 comfortable part of the SSB passband: VFO B (Tx) is offset so the RF stays
-put while the audio tone sits near the middle of the filter. Here we take
-the simpler, robust route of setting the Tx dial so ``rf = dial + tx_audio``
-lands on the same RF as the Rx tone.
+put while the audio tone sits near the middle of the filter. The engine
+computes that offset; this module just applies it.
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
 
-from .rigctl import RigctlClient, RigctldError
+from .rigctl import RigctlClient, RigctldError, normalize_mode
+
+# Hamlib level names for the meters we poll, keyed by the name used in the
+# meters dict. Split by when they are meaningful.
+_METERS_RX = {"strength": "STRENGTH"}
+_METERS_TX = {"power_w": "RFPOWER_METER_WATTS", "swr": "SWR", "alc": "ALC"}
+_METERS_ALWAYS = {"vd": "VD_METER"}
 
 
 class _RigWorker(QObject):
     connected = Signal(bool, str)             # ok, message
     status = Signal(str)
     telemetry = Signal(float, str, bool)      # rx dial Hz, mode, ptt
+    meters = Signal(object)                   # {"ptt": bool, "swr": ..., ...}
     failed = Signal(str)
 
     def __init__(self) -> None:
@@ -29,25 +39,41 @@ class _RigWorker(QObject):
         self._client: RigctlClient | None = None
         self._split = False
         self._mode = ""
+        self._meter_names: dict[str, str] = {}
+        self._poll_fails = 0
 
     @Slot(str, int, bool, str)
     def do_connect(self, host: str, port: int, split: bool, mode: str) -> None:
         self._split = split
         self._mode = mode
+        self._poll_fails = 0
         try:
             self._client = RigctlClient(host, port)
             self._client.connect()
             if mode:
                 try:
-                    self._client.set_mode(mode, 0)
-                except RigctldError:
-                    pass
+                    self._ensure_mode(mode)
+                except (RigctldError, ValueError) as e:
+                    self.failed.emit(f"set mode: {e}")
             freq = self._client.get_freq()
+            real_mode, _width = self._client.get_mode()
+            self._discover_meters()
             self.connected.emit(True, f"connected to {host}:{port}")
-            self.telemetry.emit(freq, mode, False)
+            self.telemetry.emit(freq, real_mode, False)
         except (OSError, RigctldError, ValueError) as e:
             self._client = None
             self.connected.emit(False, str(e))
+
+    def _discover_meters(self) -> None:
+        """Probe once which meters this rig can report."""
+        self._meter_names = {}
+        assert self._client is not None
+        for key, name in {**_METERS_ALWAYS, **_METERS_RX, **_METERS_TX}.items():
+            try:
+                self._client.get_level(name)
+                self._meter_names[key] = name
+            except RigctldError:
+                pass
 
     @Slot()
     def do_disconnect(self) -> None:
@@ -75,9 +101,20 @@ class _RigWorker(QObject):
             return
         self._mode = mode
         try:
-            self._client.set_mode(mode, 0)
-        except (OSError, RigctldError) as e:
+            self._ensure_mode(mode)
+        except (OSError, RigctldError, ValueError) as e:
             self.failed.emit(f"set mode: {e}")
+
+    def _ensure_mode(self, mode: str) -> None:
+        """Set *mode* only if the rig isn't already in it — mode changes are
+        slow on some rigs (~2.5 s on an FTDX-10) and churn the passband."""
+        assert self._client is not None
+        try:
+            current, _ = self._client.get_mode()
+        except (OSError, RigctldError):
+            current = ""
+        if current != normalize_mode(mode):
+            self._client.set_mode(mode, 0)
 
     @Slot(bool, float)
     def do_set_split(self, split: bool, tx_dial_hz: float) -> None:
@@ -91,7 +128,7 @@ class _RigWorker(QObject):
                 if self._mode:
                     try:
                         self._client.set_split_mode(self._mode, 0)
-                    except RigctldError:
+                    except (RigctldError, ValueError):
                         pass
             else:
                 self._client.set_split_vfo(False, "VFOA")
@@ -115,9 +152,39 @@ class _RigWorker(QObject):
             freq = self._client.get_freq()
             mode, _ = self._client.get_mode()
             ptt = self._client.get_ptt()
-            self.telemetry.emit(freq, mode, ptt)
-        except (OSError, RigctldError):
-            pass
+        except (OSError, RigctldError) as e:
+            # one hiccup is survivable (the client resyncs itself), but a
+            # dead rigctld should be reported instead of silently ignored
+            self._poll_fails += 1
+            if self._poll_fails >= 3:
+                self._drop(f"rig connection lost: {e}")
+            return
+        self._poll_fails = 0
+        self.telemetry.emit(freq, mode, ptt)
+        self.meters.emit(self._read_meters(ptt))
+
+    def _read_meters(self, ptt: bool) -> dict:
+        out: dict = {"ptt": ptt}
+        wanted = dict(_METERS_ALWAYS)
+        wanted.update(_METERS_TX if ptt else _METERS_RX)
+        for key in wanted:
+            name = self._meter_names.get(key)
+            if name is None:
+                continue
+            try:
+                out[key] = self._client.get_level(name)
+            except (OSError, RigctldError):
+                pass
+        return out
+
+    def _drop(self, msg: str) -> None:
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+        self.connected.emit(False, msg)
 
 
 class RigController(QObject):
@@ -126,6 +193,7 @@ class RigController(QObject):
     connected = Signal(bool, str)
     status = Signal(str)
     telemetry = Signal(float, str, bool)
+    meters = Signal(object)
     failed = Signal(str)
 
     _req_connect = Signal(str, int, bool, str)
@@ -146,6 +214,7 @@ class RigController(QObject):
         self._worker.connected.connect(self.connected)
         self._worker.status.connect(self.status)
         self._worker.telemetry.connect(self.telemetry)
+        self._worker.meters.connect(self.meters)
         self._worker.failed.connect(self.failed)
 
         self._req_connect.connect(self._worker.do_connect)
@@ -191,8 +260,12 @@ class RigController(QObject):
         self._req_poll.emit()
 
     def shutdown(self) -> None:
+        # run do_disconnect synchronously so queued work (incl. any pending
+        # PTT release) is processed before the thread goes down
         try:
-            self._req_disconnect.emit()
+            QMetaObject.invokeMethod(
+                self._worker, "do_disconnect",
+                Qt.ConnectionType.BlockingQueuedConnection)
         except Exception:
             pass
         self._thread.quit()

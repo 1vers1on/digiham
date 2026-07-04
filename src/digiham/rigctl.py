@@ -5,6 +5,18 @@ one or more response lines out. "Set" commands are terminated by a
 "RPRT <code>" status line; "get" commands reply with the requested
 data instead (and only send RPRT on error). See Hamlib's netrigctl
 backend for the reference implementation this client follows.
+
+Two hard-won lessons are baked in here:
+
+* Mode names must be validated before they are sent. rigctld parses an
+  unknown mode string as RIG_MODE_NONE and *still returns RPRT 0*, and
+  some backends then switch the rig to an arbitrary mode (an FTDX-10
+  was observed dropping into FM after ``M DATA-U 0``).
+
+* After a read timeout the reply eventually lands in the socket buffer
+  and every later response would be off by one forever. Like Hamlib's
+  own netrigctl (``rig_flush``), the input buffer is drained before the
+  next command whenever the stream may be dirty.
 """
 
 from __future__ import annotations
@@ -37,6 +49,35 @@ _RIG_ERRORS = {
     -21: "limit exceeded",
 }
 
+# Mode names rigctld's rig_parse_mode() understands (rig.c).
+HAMLIB_MODES = frozenset({
+    "USB", "LSB", "CW", "CWR", "CWN", "RTTY", "RTTYR",
+    "AM", "AMN", "AMS", "FM", "FMN", "WFM",
+    "PKTUSB", "PKTLSB", "PKTFM", "PKTFMN", "PKTAM",
+    "ECSSUSB", "ECSSLSB", "SAM", "SAL", "SAH", "DSB",
+    "PSK", "PSKR", "DD", "C4FM", "DSTAR",
+})
+
+# Radio-front-panel spellings -> Hamlib names.
+MODE_ALIASES = {
+    "DATA-U": "PKTUSB", "DATA-L": "PKTLSB", "DATA-FM": "PKTFM",
+    "DATA-USB": "PKTUSB", "DATA-LSB": "PKTLSB", "DATA": "PKTUSB",
+    "DIGU": "PKTUSB", "DIGL": "PKTLSB",
+}
+
+
+def normalize_mode(mode: str) -> str:
+    """Map *mode* to the Hamlib name, or raise ValueError if unknown.
+
+    "" passes through (meaning "leave the rig's mode alone").
+    """
+    m = mode.strip().upper()
+    m = MODE_ALIASES.get(m, m)
+    if m and m not in HAMLIB_MODES:
+        raise ValueError(
+            f"unknown rig mode {mode!r} (use a Hamlib name, e.g. PKTUSB for DATA-U)")
+    return m
+
 
 class RigctldError(Exception):
     """Raised when rigctld replies with a non-zero RPRT status."""
@@ -61,17 +102,23 @@ class RigctlClient:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.vfo_mode = False       # rigctld running with --vfo?
         self._sock: socket.socket | None = None
-        self._rfile = None
+        self._buf = bytearray()
+        self._dirty = False         # a timeout may have left unread reply lines
 
     def connect(self) -> None:
         if self._sock is not None:
             return
         self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-        self._rfile = self._sock.makefile("r", newline="\n")
+        self._buf.clear()
+        self._dirty = False
         # rigctld expects chk_vfo as the first command on a new connection;
         # some rig backends (e.g. dummy) hang on other commands otherwise.
-        self._raw_command("\\chk_vfo")
+        # Reply is "CHKVFO <n>" or bare "<n>"; n=1 means rigctld runs in
+        # --vfo mode and every command must carry a VFO argument.
+        reply = self._raw_command("\\chk_vfo")
+        self.vfo_mode = reply.split()[-1] == "1" if reply else False
 
     def close(self) -> None:
         if self._sock is None:
@@ -81,10 +128,9 @@ class RigctlClient:
         except OSError:
             pass
         finally:
-            self._rfile.close()
             self._sock.close()
             self._sock = None
-            self._rfile = None
+            self._buf.clear()
 
     def __enter__(self) -> "RigctlClient":
         self.connect()
@@ -96,11 +142,35 @@ class RigctlClient:
     # -- low-level protocol -------------------------------------------------
 
     def _readline(self) -> str:
-        assert self._rfile is not None
-        line = self._rfile.readline()
-        if not line:
-            raise ConnectionError("rigctld closed the connection")
-        return line.rstrip("\r\n")
+        assert self._sock is not None
+        while b"\n" not in self._buf:
+            try:
+                data = self._sock.recv(4096)
+            except TimeoutError:
+                # the reply may still arrive later; flush before next command
+                self._dirty = True
+                raise
+            if not data:
+                raise ConnectionError("rigctld closed the connection")
+            self._buf += data
+        line, _, rest = bytes(self._buf).partition(b"\n")
+        self._buf = bytearray(rest)
+        return line.decode("ascii", "replace").rstrip("\r")
+
+    def _flush_input(self) -> None:
+        """Drop any stale reply lines left over from a timed-out command."""
+        assert self._sock is not None
+        self._buf.clear()
+        self._sock.setblocking(False)
+        try:
+            while True:
+                if not self._sock.recv(4096):
+                    raise ConnectionError("rigctld closed the connection")
+        except BlockingIOError:
+            pass
+        finally:
+            self._sock.settimeout(self.timeout)
+        self._dirty = False
 
     def _raw_command(self, cmd: str) -> str:
         """Send a raw command line and return the first response line.
@@ -112,6 +182,8 @@ class RigctlClient:
         if self._sock is None:
             raise RuntimeError("not connected; call connect() or use as a context manager")
 
+        if self._dirty:
+            self._flush_input()
         self._sock.sendall((cmd + "\n").encode("ascii"))
         line = self._readline()
 
@@ -123,9 +195,12 @@ class RigctlClient:
 
         return line
 
-    @staticmethod
-    def _vfo_suffix(vfo: str | None) -> str:
-        return f" {vfo}" if vfo else ""
+    def _vfo_suffix(self, vfo: str | None) -> str:
+        if vfo:
+            return f" {vfo}"
+        # in --vfo mode every command needs a VFO; currVFO keeps behaviour
+        # identical to non-vfo mode
+        return " currVFO" if self.vfo_mode else ""
 
     # -- frequency -----------------------------------------------------------
 
@@ -143,6 +218,9 @@ class RigctlClient:
         return mode, width
 
     def set_mode(self, mode: str, width: int = 0, vfo: str | None = None) -> None:
+        mode = normalize_mode(mode)
+        if not mode:
+            return
         self._raw_command(f"M{self._vfo_suffix(vfo)} {mode} {width}")
 
     # -- vfo --------------------------------------------------------------------
@@ -163,6 +241,30 @@ class RigctlClient:
 
     def get_dcd(self, vfo: str | None = None) -> bool:
         return bool(int(self._raw_command(f"\\get_dcd{self._vfo_suffix(vfo)}")))
+
+    # -- levels / functions ----------------------------------------------------
+
+    def get_level(self, name: str, vfo: str | None = None) -> float:
+        """Read a level (meter) by Hamlib name, e.g. SWR, STRENGTH, ALC,
+        RFPOWER_METER_WATTS, VD_METER."""
+        return float(self._raw_command(f"l{self._vfo_suffix(vfo)} {name}"))
+
+    def set_level(self, name: str, value: float, vfo: str | None = None) -> None:
+        self._raw_command(f"L{self._vfo_suffix(vfo)} {name} {value:g}")
+
+    def get_func(self, name: str, vfo: str | None = None) -> bool:
+        return bool(int(self._raw_command(f"u{self._vfo_suffix(vfo)} {name}")))
+
+    def set_func(self, name: str, status: bool, vfo: str | None = None) -> None:
+        self._raw_command(f"U{self._vfo_suffix(vfo)} {name} {int(status)}")
+
+    # -- power ------------------------------------------------------------------
+
+    def get_powerstat(self) -> bool:
+        return bool(int(self._raw_command("\\get_powerstat")))
+
+    def set_powerstat(self, on: bool) -> None:
+        self._raw_command(f"\\set_powerstat {int(on)}")
 
     # -- repeater shift / offset ----------------------------------------------
 
@@ -206,6 +308,9 @@ class RigctlClient:
         return mode, width
 
     def set_split_mode(self, mode: str, width: int = 0, vfo: str | None = None) -> None:
+        mode = normalize_mode(mode)
+        if not mode:
+            return
         self._raw_command(f"X{self._vfo_suffix(vfo)} {mode} {width}")
 
     def get_split_vfo(self, vfo: str | None = None) -> tuple[bool, str]:
@@ -235,4 +340,3 @@ class RigctlClient:
 
     def set_ts(self, ts: int, vfo: str | None = None) -> None:
         self._raw_command(f"N{self._vfo_suffix(vfo)} {ts}")
-

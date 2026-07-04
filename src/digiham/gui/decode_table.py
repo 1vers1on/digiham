@@ -7,9 +7,10 @@ from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem
 
 from ..engine import DecodeRow
+from .. import geo
 from .theme import PALETTE
 
-_COLS = ["UTC", "dB", "DT", "Freq", "Message"]
+_COLS = ["UTC", "dB", "DT", "Freq", "km", "Message"]
 _MAX_ROWS = 1000
 
 
@@ -28,7 +29,7 @@ class DecodeTable(QTableWidget):
         self.setAlternatingRowColors(True)
         h = self.horizontalHeader()
         h.setStretchLastSection(True)
-        for i, wdt in enumerate((60, 42, 48, 56)):
+        for i, wdt in enumerate((60, 42, 48, 56, 46)):
             self.setColumnWidth(i, wdt)
         self.itemDoubleClicked.connect(self._on_double)
 
@@ -42,7 +43,8 @@ class DecodeTable(QTableWidget):
         row = self.rowCount()
         self.insertRow(row)
         freq = f"{d.freq_audio:4.0f}"
-        cells = [d.utc_hhmmss, f"{d.snr:+.0f}", f"{d.dt:+.1f}", freq, d.message]
+        km = geo.short_distance(d.distance_km) if d.distance_km is not None else ""
+        cells = [d.utc_hhmmss, f"{d.snr:+.0f}", f"{d.dt:+.1f}", freq, km, d.message]
         bg, fg, bold = self._style(d)
         for col, text in enumerate(cells):
             it = QTableWidgetItem(text)
@@ -50,12 +52,14 @@ class DecodeTable(QTableWidget):
                 it.setBackground(QBrush(QColor(bg)))
             if fg is not None:
                 it.setForeground(QBrush(QColor(fg)))
-            if bold and col == 4:
+            if bold and col == 5:
                 f = QFont(); f.setBold(True); it.setFont(f)
-            if col in (1, 2, 3):
+            if col in (1, 2, 3, 4):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignRight
                                     | Qt.AlignmentFlag.AlignVCenter)
             self.setItem(row, col, it)
+        if d.bearing_deg is not None:
+            self.item(row, 4).setToolTip(f"{d.bearing_deg:.0f}° from you")
         self.item(row, 0).setData(Qt.ItemDataRole.UserRole, d)
 
         if self.rowCount() > _MAX_ROWS:

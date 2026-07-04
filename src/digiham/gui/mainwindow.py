@@ -276,6 +276,22 @@ class MainWindow(QMainWindow):
         self._radio_group.idToggled.connect(self._radio_selected)
         lay.addWidget(tm)
 
+        # rig meters (fed by rigctld polling)
+        rm = QGroupBox("Rig")
+        g = QGridLayout(rm)
+        self.meter_labels: dict[str, QLabel] = {}
+        for col, (key, title) in enumerate(
+                [("strength", "S-meter"), ("power_w", "Pwr"), ("swr", "SWR"),
+                 ("alc", "ALC"), ("vd", "Vd")]):
+            t = QLabel(title)
+            t.setStyleSheet(f"color:{PALETTE['text_dim']};")
+            v = QLabel("—")
+            v.setStyleSheet("font-weight:600;")
+            g.addWidget(t, 0, col, Qt.AlignmentFlag.AlignHCenter)
+            g.addWidget(v, 1, col, Qt.AlignmentFlag.AlignHCenter)
+            self.meter_labels[key] = v
+        lay.addWidget(rm)
+
         # operating controls
         oc = QGroupBox("Controls")
         g = QGridLayout(oc)
@@ -338,6 +354,8 @@ class MainWindow(QMainWindow):
         e.freqChanged.connect(self._on_freq)
         e.dialChanged.connect(self._on_dial)
         e.rigState.connect(self._on_rig_state)
+        e.rigMeters.connect(self._on_rig_meters)
+        e.bandChanged.connect(self._on_band_followed)
         e.qsoLogged.connect(self._on_qso_logged)
 
     def _apply_visual_config(self) -> None:
@@ -413,6 +431,11 @@ class MainWindow(QMainWindow):
             txt = (f"{'CQ' if s['calling_cq'] else 'DX'} {s['dxcall']} "
                    f"{s['dxgrid']}  sent {s['report_out']:+d}"
                    + (f"  rcvd {rin:+d}" if rin is not None else ""))
+            if s["dxgrid"] and self.cfg.my_grid:
+                from .. import geo
+                db = geo.distance_bearing(self.cfg.my_grid, s["dxgrid"])
+                if db is not None:
+                    txt += f"\n{db[0]:.0f} km  @ {db[1]:.0f}°"
             self.qso_status.setText(txt)
         else:
             self.qso_status.setText("—")
@@ -436,6 +459,35 @@ class MainWindow(QMainWindow):
         self._updating = True
         self.rig_btn.setChecked(connected)
         self.rig_btn.setText("Rig ✓" if connected else "Connect Rig")
+        self._updating = False
+        if not connected:
+            for lbl in self.meter_labels.values():
+                lbl.setText("—")
+                lbl.setStyleSheet("font-weight:600;")
+
+    def _on_rig_meters(self, d: dict) -> None:
+        if "strength" in d:
+            v = d["strength"]
+            # Hamlib STRENGTH is dB relative to S9 (6 dB per S-unit)
+            self.meter_labels["strength"].setText(
+                f"S9+{v:.0f}" if v > 0 else f"S{max(0.0, 9 + v / 6):.0f}")
+        if "power_w" in d:
+            self.meter_labels["power_w"].setText(f"{d['power_w']:.0f} W")
+        if "swr" in d:
+            swr = d["swr"]
+            lbl = self.meter_labels["swr"]
+            lbl.setText(f"{swr:.1f}" if swr >= 1.0 else "—")
+            color = PALETTE["red"] if swr >= 2.5 else \
+                PALETTE["amber"] if swr >= 1.8 else PALETTE["text"]
+            lbl.setStyleSheet(f"font-weight:600; color:{color};")
+        if "alc" in d:
+            self.meter_labels["alc"].setText(f"{d['alc'] * 100:.0f}%")
+        if "vd" in d:
+            self.meter_labels["vd"].setText(f"{d['vd']:.1f} V")
+
+    def _on_band_followed(self, band: str) -> None:
+        self._updating = True
+        self.band_combo.setCurrentText(band)
         self._updating = False
 
     def _on_qso_logged(self, q) -> None:

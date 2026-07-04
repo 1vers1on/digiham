@@ -54,7 +54,8 @@ class Config:
     rig_host: str = "localhost"
     rig_port: int = 4532
     rig_split: bool = True         # use split (Tx on VFO B) to keep audio in passband
-    rig_mode: str = "USB"         # rig sideband mode to force on connect ("" = leave)
+    rig_mode: str = "PKTUSB"      # Hamlib mode to force on connect ("" = leave);
+                                   # PKTUSB is DATA-U/DATA-USB on the radio's panel
     ptt_method: str = "rigctld"   # rigctld | vox | none
 
     # --- Decoding --------------------------------------------------------

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import Config
+from ..rigctl import normalize_mode
 from .. import audio
 
 
@@ -70,8 +71,14 @@ class SettingsDialog(QDialog):
         self.c_split = QCheckBox("Use split (Tx on VFO B)")
         self.c_split.setChecked(self.cfg.rig_split)
         self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["USB", "LSB", "DATA-U", "PKTUSB", "FM", ""])
-        self.cb_mode.setCurrentText(self.cfg.rig_mode)
+        # Hamlib mode names only — rigctld accepts anything else as "mode
+        # none" and some rigs then jump to a random mode. PKTUSB is what
+        # radios label DATA-U / DATA-USB.
+        self.cb_mode.addItems(["PKTUSB", "USB", "PKTLSB", "LSB", "FM", ""])
+        try:
+            self.cb_mode.setCurrentText(normalize_mode(self.cfg.rig_mode))
+        except ValueError:
+            self.cb_mode.setCurrentText("PKTUSB")
         self.cb_ptt = QComboBox()
         self.cb_ptt.addItems(["rigctld", "vox", "none"])
         self.cb_ptt.setCurrentText(self.cfg.ptt_method)

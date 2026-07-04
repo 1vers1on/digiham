@@ -20,6 +20,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 import ft8lib
 
 from . import bands
+from . import geo
 from .adif import Qso, QsoLog
 from .audio import Capture, TxPlayer
 from .config import Config
@@ -64,6 +65,8 @@ class DecodeRow:
     grid: str = ""
     worked_before: bool = False
     new_call: bool = False
+    distance_km: Optional[float] = None
+    bearing_deg: Optional[float] = None
     parsed: seq.ParsedMessage = field(default_factory=lambda: seq.ParsedMessage(""))
 
     @property
@@ -88,6 +91,8 @@ class RadioEngine(QObject):
     sequencerState = Signal(object)       # dict
     freqChanged = Signal(int, int)        # rx audio, tx audio
     rigState = Signal(bool, float, str)   # connected, dial Hz, mode
+    rigMeters = Signal(object)            # dict from RigController.meters
+    bandChanged = Signal(str)             # band followed the rig dial
     dialChanged = Signal(float)
     qsoLogged = Signal(object)            # Qso
 
@@ -122,6 +127,8 @@ class RadioEngine(QObject):
         self._seen: dict[int, set] = {}
         self._cur_cycle = -1
         self._rig_poll_t = 0.0
+        self._rig_want = False        # user wants the rig connected
+        self._rig_retry_t = 0.0
         self.monitoring = True
 
         # wiring
@@ -130,6 +137,7 @@ class RadioEngine(QObject):
         self.decoder.failed.connect(self.statusMessage)
         self.rig.connected.connect(self._on_rig_connected)
         self.rig.telemetry.connect(self._on_rig_telemetry)
+        self.rig.meters.connect(self.rigMeters)
         self.rig.failed.connect(self.statusMessage)
         self._txFinished.connect(self._on_tx_finished)
 
@@ -230,6 +238,8 @@ class RadioEngine(QObject):
         self.dialChanged.emit(self.dial_hz)
         if self.rig.is_connected:
             self.rig.set_freq(self.dial_hz)
+            if self.cfg.rig_mode:
+                self.rig.set_mode(self.cfg.rig_mode)
         self.statusMessage.emit(f"{band}  {self.dial_hz/1e6:.6f} MHz")
 
     def set_rx_freq(self, hz: int) -> None:
@@ -334,10 +344,13 @@ class RadioEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def connect_rig(self) -> None:
+        self._rig_want = True
+        self._rig_retry_t = time.time()
         self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
                              self.cfg.rig_split, self.cfg.rig_mode)
 
     def disconnect_rig(self) -> None:
+        self._rig_want = False
         self.rig.disconnect_rig()
 
     def _on_rig_connected(self, ok: bool, msg: str) -> None:
@@ -350,6 +363,14 @@ class RadioEngine(QObject):
         if dial > 0 and abs(dial - self.dial_hz) > 1:
             self.dial_hz = dial
             self.dialChanged.emit(dial)
+            # follow the rig: turning the knob onto another band switches
+            # the app's band with it
+            band = bands.band_for_freq(dial)
+            if band and band != self.band:
+                self.band = band
+                self.cfg.band = band
+                self.bandChanged.emit(band)
+                self.statusMessage.emit(f"rig QSY → {band}")
         self.rigState.emit(True, dial, mode)
 
     # ------------------------------------------------------------------ #
@@ -375,6 +396,12 @@ class RadioEngine(QObject):
         if now - self._rig_poll_t > 1.0 and self.rig.is_connected:
             self._rig_poll_t = now
             self.rig.poll()
+        if self._rig_want and not self.rig.is_connected \
+                and now - self._rig_retry_t > 10.0:
+            self._rig_retry_t = now
+            self.statusMessage.emit("rig: reconnecting…")
+            self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
+                                 self.cfg.rig_split, self.cfg.rig_mode)
 
         if self.monitoring:
             self._schedule_decodes(cycle, cstart, t)
@@ -450,6 +477,11 @@ class RadioEngine(QObject):
         pm = seq.parse(r.message)
         rf = self.dial_hz + r.freq
         de_base = seq.base_call(pm.de) if pm.de else ""
+        dist = bearing = None
+        if pm.grid and self.cfg.my_grid:
+            db = geo.distance_bearing(self.cfg.my_grid, pm.grid)
+            if db is not None:
+                dist, bearing = db
         row = DecodeRow(
             time_utc=cstart + self.spec.tx_offset,
             cycle=cycle, mode=self.mode, band=self.band, message=r.message,
@@ -459,6 +491,7 @@ class RadioEngine(QObject):
             is_cq=pm.is_cq, directed_cq=pm.cq_dir, de=de_base, grid=pm.grid,
             worked_before=de_base in worked if de_base else False,
             new_call=bool(de_base) and de_base not in worked,
+            distance_km=dist, bearing_deg=bearing,
             parsed=pm)
         return row
 
@@ -509,8 +542,9 @@ class RadioEngine(QObject):
         self._begin_tx(msg, self.seq.next_tx, t)
 
     def _begin_tx(self, msg: str, idx: int, t_in_cycle: float) -> None:
+        split_offset = self._split_offset()
         try:
-            wave = self._render_tx(msg)
+            wave = self._render_tx(msg, self.tx_freq - split_offset)
         except Exception as e:
             self.statusMessage.emit(f"encode failed: {e}")
             return
@@ -522,7 +556,7 @@ class RadioEngine(QObject):
         self._qso_time_on = self._qso_time_on or time.time()
         if self.rig.is_connected and self.cfg.ptt_method == "rigctld":
             if self.cfg.rig_split:
-                self.rig.set_split(True, self.dial_hz)
+                self.rig.set_split(True, self.dial_hz + split_offset)
             self.rig.set_ptt(True)
         self.txStateChanged.emit(True, msg)
         self.statusMessage.emit(f"Tx: {msg}")
@@ -532,15 +566,27 @@ class RadioEngine(QObject):
             self.statusMessage.emit(f"Tx audio failed: {e}")
             self._end_tx()
 
-    def _render_tx(self, msg: str) -> np.ndarray:
+    def _split_offset(self) -> int:
+        """WSJT-X style "fake it": shift the Tx dial in 500 Hz steps so the
+        transmitted audio tone lands in the clean 1500–2000 Hz part of the
+        passband while the RF stays put."""
+        if not (self.cfg.rig_split and self.rig.is_connected
+                and self.cfg.ptt_method == "rigctld"):
+            return 0
+        tone = self.tx_freq
+        if 1500 <= tone < 2000:
+            return 0
+        return 500 * (tone // 500) - 1500
+
+    def _render_tx(self, msg: str, f0: float) -> np.ndarray:
         spec = self.spec
         if self.mode == "FT8":
-            body = ft8lib.encode_ft8(msg, f0=float(self.tx_freq))
+            body = ft8lib.encode_ft8(msg, f0=float(f0))
         elif self.mode == "FT4":
-            body = ft8lib.encode_ft4(msg, f0=float(self.tx_freq))
+            body = ft8lib.encode_ft4(msg, f0=float(f0))
         else:
             wmsg = self._wspr_message()
-            body = ft8lib.encode_wspr(wmsg, f0=float(self.tx_freq or 1500))
+            body = ft8lib.encode_wspr(wmsg, f0=float(f0 or 1500))
         tail = int(0.1 * ft8lib.SAMPLE_RATE)
         out = np.zeros(spec.tx_start_sample + len(body) + tail, dtype=np.float64)
         out[spec.tx_start_sample:spec.tx_start_sample + len(body)] = body
