@@ -280,18 +280,66 @@ class Sequencer:
     # -- reactive transitions --------------------------------------------
 
     def on_decode(self, pm: ParsedMessage, snr: float) -> Optional[LogRequest]:
-        """Advance the QSO given a message from the current DX to us.
+        """Advance the *current* QSO given a message from our DX to us.
 
-        Returns a :class:`LogRequest` when the exchange reaches a point
-        that should be logged, otherwise ``None``.
+        This only fires when we are already working the station the message
+        came from; use :meth:`engage` to pick a station up from a cold start.
+        Returns a :class:`LogRequest` when the exchange reaches a point that
+        should be logged, otherwise ``None``.
         """
         if not (self.in_qso and self.is_for_me(pm) and self.is_current_dx(pm)):
             return None
+        return self._advance(pm, snr)
 
+    def engage(self, pm: ParsedMessage, snr: float) -> Optional[LogRequest]:
+        """Start or continue a QSO in reply to a message addressed to us.
+
+        Unlike :meth:`on_decode` this works from any state: when we are not
+        already working the sender it infers our role (were we the CQ
+        station, or did we answer a CQ?) from the kind of message, sets the
+        QSO up, then advances to the correct reply. This is the single entry
+        point for both manual pick-up (double-click) and auto-sequencing a
+        fresh caller, so the two always choose the same message.
+        """
+        dxcall = base_call(pm.de)
+        if not dxcall or same_call(dxcall, self.mycall):
+            return None
+        if not (self.in_qso and same_call(dxcall, self.dxcall)):
+            calling_cq = self._role_for_kind(pm.kind)
+            self._begin(dxcall, pm.grid, snr, calling_cq)
+            # A sane starting reply before the message-specific advance: the
+            # CQ station answers a caller with a report (Tx2); a caller
+            # answers a CQ with its grid (Tx1).
+            self.next_tx = 2 if calling_cq else 1
+        return self._advance(pm, snr)
+
+    def _role_for_kind(self, kind: str) -> bool:
+        """Infer whether *we* were the CQ station for a fresh engagement.
+
+        The message DX just sent us pins down who called whom: a grid (or a
+        bare answer) or an ``R`` report means DX answered *our* CQ, so we are
+        the CQ station; a plain report or a roger means DX called CQ and we
+        answered it.
+        """
+        if kind in (K_GRID, K_RREPORT):
+            return True
+        if kind in (K_REPORT, K_RRR, K_RR73, K_73):
+            return False
+        return self.calling_cq
+
+    def _advance(self, pm: ParsedMessage, snr: float) -> Optional[LogRequest]:
+        """Move the state machine one step for a message from our DX.
+
+        Assumes the QSO is set up and *pm* is addressed to us by the current
+        DX; :meth:`on_decode` and :meth:`engage` enforce that.
+        """
         log: Optional[LogRequest] = None
         if pm.kind == K_GRID:
             if pm.grid:
                 self.dxgrid = pm.grid
+            # Only the CQ station steps forward on a bare grid/answer; a
+            # caller has already sent its grid and is waiting for a report,
+            # so it simply holds and lets its current message repeat.
             if self.calling_cq:
                 self.next_tx = 2
         elif pm.kind == K_REPORT:
@@ -300,10 +348,7 @@ class Sequencer:
         elif pm.kind == K_RREPORT:
             self.report_in = pm.report
             self.next_tx = 4
-        elif pm.kind == K_RRR:
-            self.next_tx = 5
-            log = self._log_request()
-        elif pm.kind == K_RR73:
+        elif pm.kind in (K_RRR, K_RR73):
             self.next_tx = 5
             log = self._log_request()
         elif pm.kind == K_73:

@@ -317,18 +317,24 @@ class RadioEngine(QObject):
     def double_click_decode(self, row: DecodeRow) -> None:
         if self.cfg.double_click_qsy and not self.cfg.hold_tx_freq:
             self.set_rx_freq(int(round(row.freq_audio)))
-        if row.is_cq or (not row.to_me and row.de):
-            # answer this station
+        if not row.de or seq.same_call(row.de, self.cfg.my_call):
+            return
+        log = None
+        if row.to_me:
+            # They are already working us — reply with the *right* next
+            # message for what they sent (a report if they answered our CQ
+            # with a grid, a roger if they reported us, and so on) instead of
+            # blindly resending our grid.
+            log = self.seq.engage(row.parsed, row.snr)
+        else:
+            # They are calling CQ (or working someone else) and we want to
+            # answer them: we become the caller and open with our grid.
             self.seq.answer_cq(row.de, row.grid, row.snr)
-            self.decoder.prime_station(self.cfg.my_call, row.de)
-            self._qso_time_on = time.time()
-            self.enable_tx(True)
-        elif row.to_me and row.de:
-            self.seq.answer_cq(row.de, row.grid, row.snr)
-            self.seq.on_decode(row.parsed, row.snr)
-            self.decoder.prime_station(self.cfg.my_call, row.de)
-            self._qso_time_on = time.time()
-            self.enable_tx(True)
+        self.decoder.prime_station(self.cfg.my_call, row.de)
+        self._qso_time_on = self._qso_time_on or time.time()
+        self.enable_tx(True)
+        if log and self.cfg.auto_log:
+            self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
         self._emit_tx_messages()
         self._emit_seq_state()
 
@@ -498,24 +504,35 @@ class RadioEngine(QObject):
     def _auto_sequence(self, row: DecodeRow) -> None:
         if not self.cfg.auto_seq or not self.cfg.my_call:
             return
+        if not row.to_me or not row.de or seq.same_call(row.de, self.cfg.my_call):
+            return
         s = self.seq
         pm = row.parsed
-        if row.to_me and s.in_qso and s.is_current_dx(pm):
-            log = s.on_decode(pm, row.snr)
-            self._qso_time_on = self._qso_time_on or time.time()
-            self._watchdog_deadline = time.time() + self.cfg.tx_watchdog_min * 60
-            self._emit_tx_messages()
-            self._emit_seq_state()
-            if log and self.cfg.auto_log:
-                self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
-        elif row.to_me and not s.in_qso and self.tx_enabled and self.cfg.call_first \
-                and pm.kind == seq.K_GRID and row.de:
-            s.answer_caller(row.de, row.grid, row.snr)
+        if s.in_qso and s.is_current_dx(pm):
+            # A message from the station we are working — advance the QSO.
+            # This keeps our role fixed and handles retries (a repeated
+            # message just re-queues the same reply).
+            self._apply_seq_result(s.on_decode(pm, row.snr))
+        elif not s.in_qso and self.tx_enabled and self.cfg.call_first \
+                and pm.kind in (seq.K_GRID, seq.K_REPORT):
+            # A fresh caller is answering our CQ (a grid, or straight in with
+            # a report). engage() infers that we are the CQ station and opens
+            # with the correct reply.
+            self._apply_seq_result(s.engage(pm, row.snr))
             self.decoder.prime_station(self.cfg.my_call, row.de)
-            self._qso_time_on = time.time()
-            self._watchdog_deadline = time.time() + self.cfg.tx_watchdog_min * 60
-            self._emit_tx_messages()
-            self._emit_seq_state()
+        # Otherwise the message is addressed to us but we are busy with
+        # another station (or not calling) — leave it for the operator.
+
+    def _apply_seq_result(self, log: Optional[seq.LogRequest]) -> None:
+        """Shared bookkeeping after the sequencer advances a QSO."""
+        now = time.time()
+        self._qso_time_on = self._qso_time_on or now
+        if self.cfg.tx_watchdog_min:
+            self._watchdog_deadline = now + self.cfg.tx_watchdog_min * 60
+        self._emit_tx_messages()
+        self._emit_seq_state()
+        if log and self.cfg.auto_log:
+            self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
 
     # ------------------------------------------------------------------ #
     # transmit
