@@ -1,10 +1,15 @@
 """Persistent configuration for digiham.
 
-Settings live in a single JSON file under the platform config directory
-(``$XDG_CONFIG_HOME/digiham/config.json`` on Linux). The :class:`Config`
-dataclass is the in-memory model; :func:`load` and :meth:`Config.save`
-round-trip it to disk. Unknown keys in the file are ignored so old
-configs keep loading after new fields are added.
+Settings live in a single JSON file under the platform's per-user config
+directory:
+
+* Linux/BSD: ``$XDG_CONFIG_HOME/digiham`` (default ``~/.config/digiham``)
+* macOS: ``~/Library/Application Support/digiham``
+* Windows: ``%APPDATA%\\digiham`` (default ``~\\AppData\\Roaming\\digiham``)
+
+The :class:`Config` dataclass is the in-memory model; :func:`load` and
+:meth:`Config.save` round-trip it to disk. Unknown keys in the file are
+ignored so old configs keep loading after new fields are added.
 """
 
 from __future__ import annotations
@@ -12,13 +17,32 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 
+def _platform_config_base() -> Path:
+    """Return the platform's per-user config base directory.
+
+    The ``digiham`` subdirectory is appended by :func:`config_dir`.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        if base:
+            return Path(base)
+        return Path.home() / "AppData" / "Roaming"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    # Linux, *BSD and anything else: follow the XDG Base Directory spec.
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base)
+    return Path.home() / ".config"
+
+
 def config_dir() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    d = Path(base) / "digiham"
+    d = _platform_config_base() / "digiham"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
