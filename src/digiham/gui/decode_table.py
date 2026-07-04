@@ -61,6 +61,15 @@ class DecodeTable(QTableWidget):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignRight
                                     | Qt.AlignmentFlag.AlignVCenter)
             self.setItem(row, col, it)
+        # Shout-out: a digiham developer is on the air. Mark the whole row in
+        # cyan with a badge on the message so users can spot (and work) them.
+        if d.is_dev:
+            for col in range(len(cells)):
+                self.item(row, col).setForeground(QBrush(QColor(PALETTE["cyan"])))
+            m = self.item(row, _MSG_COL)
+            mf = QFont(); mf.setBold(True); m.setFont(mf)
+            m.setText(f"◆ {d.message}")
+            m.setToolTip(f"{d.de} — digiham developer")
         # Highlight a new DXCC entity on the Country cell.
         if d.new_dxcc and d.country:
             cc = self.item(row, 5)

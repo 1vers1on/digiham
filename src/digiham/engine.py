@@ -23,9 +23,11 @@ import ft8lib
 logger = logging.getLogger(__name__)
 
 from . import bands
+from . import devs
 from . import dxcc
 from . import geo
 from . import serialports
+from . import adif
 from .adif import Qso, QsoLog
 from .audio import Capture, TxPlayer
 from .config import Config
@@ -80,6 +82,7 @@ class DecodeRow:
     grid: str = ""
     worked_before: bool = False
     new_call: bool = False
+    is_dev: bool = False        # sender is a digiham developer (shout-out)
     country: str = ""
     continent: str = ""
     new_dxcc: bool = False
@@ -130,7 +133,9 @@ class RadioEngine(QObject):
 
         self.log = QsoLog(cfg.resolved_log_file())
         self.spots = SpotLog(cfg.resolved_all_txt(), cfg.all_txt)
-        self.seq = seq.Sequencer(cfg.my_call, cfg.my_grid)
+        self.seq = seq.Sequencer(cfg.my_call, cfg.my_grid,
+                                 contest=cfg.contest_mode,
+                                 my_exch=cfg.fd_exchange())
 
         self.capture: Optional[Capture] = None
         self.tx = TxPlayer(cfg.audio_out, cfg.tx_audio_level)
@@ -315,6 +320,11 @@ class RadioEngine(QObject):
     def enable_tx(self, on: bool) -> None:
         if on and self._tuning:
             self.set_tune(False)
+        if on and self.cfg.contest_mode == "FD" and not self.cfg.fd_exchange():
+            # Field Day cannot transmit without a class + section exchange.
+            logger.warning("Field Day enabled but no class/section set")
+            self.statusMessage.emit(
+                "Field Day: set your class and section in Settings before transmitting")
         self.tx_enabled = on
         logger.info("tx %s", "enabled" if on else "disabled")
         if on:
@@ -396,7 +406,8 @@ class RadioEngine(QObject):
         self._qso_time_on = self._qso_time_on or time.time()
         self.enable_tx(True)
         if log and self.cfg.auto_log:
-            self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
+            self._commit_log(log.dxcall, log.dxgrid, log.report_sent,
+                             log.report_recv, log.dxexch)
         self._emit_tx_messages()
         self._emit_seq_state()
 
@@ -405,7 +416,7 @@ class RadioEngine(QObject):
         if not s.dxcall:
             self.statusMessage.emit("no QSO to log")
             return
-        self._commit_log(s.dxcall, s.dxgrid, s.report_out, s.report_in)
+        self._commit_log(s.dxcall, s.dxgrid, s.report_out, s.report_in, s.dxexch)
 
     # ------------------------------------------------------------------ #
     # rig
@@ -674,6 +685,7 @@ class RadioEngine(QObject):
             is_cq=pm.is_cq, directed_cq=pm.cq_dir, de=de_base, grid=pm.grid,
             worked_before=de_base in worked if de_base else False,
             new_call=bool(de_base) and de_base not in worked,
+            is_dev=devs.is_dev(de_base),
             country=country, continent=ent.continent if ent else "",
             new_dxcc=bool(country) and country not in worked_dxcc,
             new_grid=bool(pm.grid) and pm.grid[:4] not in worked_grids,
@@ -720,10 +732,10 @@ class RadioEngine(QObject):
             # message just re-queues the same reply).
             self._apply_seq_result(s.on_decode(pm, row.snr))
         elif not s.in_qso and self.tx_enabled and self.cfg.call_first \
-                and pm.kind in (seq.K_GRID, seq.K_REPORT):
-            # A fresh caller is answering our CQ (a grid, or straight in with
-            # a report). engage() infers that we are the CQ station and opens
-            # with the correct reply.
+                and pm.kind in (seq.K_GRID, seq.K_REPORT, seq.K_EXCH):
+            # A fresh caller is answering our CQ (a grid, a report, or a Field
+            # Day class/section exchange). engage() infers that we are the CQ
+            # station and opens with the correct reply.
             self._apply_seq_result(s.engage(pm, row.snr))
             self.decoder.prime_station(self.cfg.my_call, row.de)
         # Otherwise the message is addressed to us but we are busy with
@@ -738,7 +750,8 @@ class RadioEngine(QObject):
         self._emit_tx_messages()
         self._emit_seq_state()
         if log and self.cfg.auto_log:
-            self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
+            self._commit_log(log.dxcall, log.dxgrid, log.report_sent,
+                             log.report_recv, log.dxexch)
 
     # ------------------------------------------------------------------ #
     # transmit
@@ -899,7 +912,14 @@ class RadioEngine(QObject):
         self._emit_tx_messages()
         self._emit_seq_state()
         if log and self.cfg.auto_log:
-            self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
+            self._commit_log(log.dxcall, log.dxgrid, log.report_sent,
+                             log.report_recv, log.dxexch)
+        # "Disable Tx after the QSO completes": sending RR73 (idx 4) or 73
+        # (idx 5) ends the exchange, so drop out of transmit for work-one-
+        # and-stop operating.
+        if self.cfg.disable_tx_after_qso and idx in (4, 5) and self.tx_enabled:
+            logger.info("QSO complete; disabling Tx (disable_tx_after_qso)")
+            self.enable_tx(False)
 
     def _end_tx(self) -> None:
         if self._txing or self._tuning:
@@ -916,11 +936,24 @@ class RadioEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def _commit_log(self, dxcall: str, dxgrid: str,
-                report_sent: int, report_recv: Optional[int]) -> None:
+                report_sent: int, report_recv: Optional[int],
+                dxexch: str = "") -> None:
         now = dt.datetime.now(dt.timezone.utc)
         t_on = dt.datetime.fromtimestamp(self._qso_time_on or now.timestamp(),
                                          dt.timezone.utc)
         rf_mhz = (self.dial_hz + self.tx_freq) / 1e6
+        comment = f"{self.mode} {self.band}"
+        extra: dict = {}
+        if self.cfg.contest_mode == "FD":
+            extra["CONTEST_ID"] = "ARRL-FIELD-DAY"
+            if self.cfg.fd_exchange():
+                extra["STX_STRING"] = self.cfg.fd_exchange()
+            if dxexch:
+                extra["SRX_STRING"] = dxexch
+                cls, _, sect = dxexch.partition(" ")
+                extra["CLASS"] = cls
+                extra["ARRL_SECT"] = sect
+                comment = f"FD {dxexch}"
         q = Qso(
             call=dxcall, qso_date=t_on.strftime("%Y%m%d"),
             time_on=t_on.strftime("%H%M%S"),
@@ -931,7 +964,7 @@ class RadioEngine(QObject):
             gridsquare=dxgrid, station_callsign=self.cfg.my_call,
             my_gridsquare=self.cfg.my_grid,
             tx_pwr_w=round(10 ** ((self.cfg.tx_power_dbm - 30) / 10), 2),
-            comment=f"{self.mode} {self.band}")
+            comment=comment, extra=extra)
         try:
             added = self.log.add(q)
         except OSError as e:
@@ -939,10 +972,22 @@ class RadioEngine(QObject):
             self.statusMessage.emit(f"log write failed: {e}")
             return
         if added:
+            self._write_daily_adif(q)
             self.qsoLogged.emit(q)
             self.reporter.report_qso(q)
             self.statusMessage.emit(f"logged {dxcall}")
         self._qso_time_on = None
+
+    def _write_daily_adif(self, q: Qso) -> None:
+        """Also append the QSO to a dated per-day ADIF file, if enabled."""
+        if not self.cfg.adif_daily_files:
+            return
+        path = adif.daily_path(self.cfg.resolved_daily_dir(), q.qso_date)
+        try:
+            adif.append_qso_file(path, q)
+        except OSError as e:
+            logger.error("failed to write daily ADIF %s: %s", path, e)
+            self.statusMessage.emit(f"daily ADIF write failed: {e}")
 
     # ------------------------------------------------------------------ #
     # spectrum
@@ -1002,6 +1047,8 @@ class RadioEngine(QObject):
         self.cfg = cfg
         self.seq.set_station(cfg.my_call, cfg.my_grid)
         self.seq.use_rr73 = True
+        self.seq.contest = cfg.contest_mode
+        self.seq.my_exch = cfg.fd_exchange()
         self.tx.level = cfg.tx_audio_level
         self.spots.path = cfg.resolved_all_txt()
         self.spots.enabled = cfg.all_txt

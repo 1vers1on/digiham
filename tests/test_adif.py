@@ -9,7 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from digiham.adif import Qso, QsoLog, qso_to_adif, parse_adif  # noqa: E402
+from digiham.adif import (  # noqa: E402
+    Qso, QsoLog, qso_to_adif, parse_adif, append_qso_file, daily_path,
+)
 
 
 def _qso(call="DL1ABC", date="20260704", time_on="143000", band="20m",
@@ -85,6 +87,23 @@ class CsvExportTests(unittest.TestCase):
             self.assertEqual(lines[0].split(",")[0], "CALL")
             self.assertIn("DL1ABC", lines[1])
             self.assertIn("JO31", lines[1])
+
+
+class DailyFileTests(unittest.TestCase):
+    def test_daily_path_uses_qso_date(self):
+        p = daily_path("/logs", "20260704")
+        self.assertEqual(p.name, "digiham_20260704.adi")
+
+    def test_append_writes_header_once_then_appends(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = daily_path(d, "20260704")
+            append_qso_file(path, _qso(call="DL1ABC"))
+            append_qso_file(path, _qso(call="EA1XYZ", time_on="143100"))
+            text = path.read_text()
+            self.assertEqual(text.count("<EOH>"), 1)   # one header
+            self.assertEqual(text.count("<EOR>"), 2)   # two QSOs
+            self.assertIn("DL1ABC", text)
+            self.assertIn("EA1XYZ", text)
 
 
 class SafetyTests(unittest.TestCase):

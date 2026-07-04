@@ -262,6 +262,8 @@ class SettingsDialog(QDialog):
         self.c_callfirst.setChecked(self.cfg.call_first)
         self.c_autolog = QCheckBox("Log automatically on RR73/73")
         self.c_autolog.setChecked(self.cfg.auto_log)
+        self.c_distx = QCheckBox("Disable Tx after the QSO completes (send 73, then stop)")
+        self.c_distx.setChecked(self.cfg.disable_tx_after_qso)
         self.c_dcqsy = QCheckBox("Double-click a decode sets Rx frequency")
         self.c_dcqsy.setChecked(self.cfg.double_click_qsy)
         self.c_cqonly = QCheckBox("Band Activity shows CQ only")
@@ -273,10 +275,38 @@ class SettingsDialog(QDialog):
         f.addRow(self.c_autoseq)
         f.addRow(self.c_callfirst)
         f.addRow(self.c_autolog)
+        f.addRow(self.c_distx)
         f.addRow(self.c_dcqsy)
         f.addRow(self.c_cqonly)
         f.addRow(self.c_hidework)
         f.addRow("Tx watchdog (0 = off)", self.s_wd)
+
+        contest = QGroupBox("Contest")
+        cf = QFormLayout(contest)
+        self.cb_contest = QComboBox()
+        self.cb_contest.addItem("Off (normal QSOs)", "")
+        self.cb_contest.addItem("ARRL Field Day", "FD")
+        idx = self.cb_contest.findData(self.cfg.contest_mode)
+        self.cb_contest.setCurrentIndex(idx if idx >= 0 else 0)
+        self.e_fdclass = QLineEdit(self.cfg.fd_class)
+        self.e_fdclass.setPlaceholderText("e.g. 1D, 3A")
+        self.e_fdsect = QLineEdit(self.cfg.fd_section)
+        self.e_fdsect.setPlaceholderText("ARRL/RAC section, e.g. WI, EMA, DX")
+        cf.addRow("Mode", self.cb_contest)
+        cf.addRow("Field Day class", self.e_fdclass)
+        cf.addRow("Field Day section", self.e_fdsect)
+        fd_note = QLabel("Field Day sends a class + section exchange "
+                         "(“K1ABC W9XYZ 3A EMA”) instead of a signal report.")
+        fd_note.setWordWrap(True)
+        cf.addRow(fd_note)
+
+        def _sync_contest():
+            fd = self.cb_contest.currentData() == "FD"
+            self.e_fdclass.setEnabled(fd)
+            self.e_fdsect.setEnabled(fd)
+        self.cb_contest.currentIndexChanged.connect(_sync_contest)
+        _sync_contest()
+        f.addRow(contest)
 
         alerts = QGroupBox("Alerts")
         af = QFormLayout(alerts)
@@ -305,11 +335,15 @@ class SettingsDialog(QDialog):
         self.e_udp_id.setPlaceholderText("digiham")
         self.c_alltxt = QCheckBox("Write an ALL.TXT spot log (WSJT-X style)")
         self.c_alltxt.setChecked(self.cfg.all_txt)
+        self.c_daily = QCheckBox("Also write a dated ADIF file per day "
+                                 "(digiham_YYYYMMDD.adi)")
+        self.c_daily.setChecked(self.cfg.adif_daily_files)
         f.addRow(self.c_udp)
         f.addRow("UDP server host", self.e_udp_host)
         f.addRow("UDP server port", self.s_udp_port)
         f.addRow("Instance id", self.e_udp_id)
         f.addRow(self.c_alltxt)
+        f.addRow(self.c_daily)
         note = QLabel("Sends the same UDP datagrams as WSJT-X so companions "
                       "like GridTracker and JTAlert can follow digiham. Point "
                       "them at this host/port (WSJT-X default is 2237).")
@@ -375,6 +409,10 @@ class SettingsDialog(QDialog):
         c.auto_seq = self.c_autoseq.isChecked()
         c.call_first = self.c_callfirst.isChecked()
         c.auto_log = self.c_autolog.isChecked()
+        c.disable_tx_after_qso = self.c_distx.isChecked()
+        c.contest_mode = self.cb_contest.currentData() or ""
+        c.fd_class = self.e_fdclass.text().strip().upper()
+        c.fd_section = self.e_fdsect.text().strip().upper()
         c.double_click_qsy = self.c_dcqsy.isChecked()
         c.cq_only = self.c_cqonly.isChecked()
         c.hide_worked = self.c_hidework.isChecked()
@@ -387,6 +425,7 @@ class SettingsDialog(QDialog):
         c.udp_port = self.s_udp_port.value()
         c.udp_id = self.e_udp_id.text().strip() or "digiham"
         c.all_txt = self.c_alltxt.isChecked()
+        c.adif_daily_files = self.c_daily.isChecked()
         c.theme = self.cb_theme.currentText()
         c.waterfall_palette = self.cb_wf.currentText()
         c.waterfall_gain = self.s_wfg.value()

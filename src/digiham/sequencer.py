@@ -32,6 +32,9 @@ _GRID4 = re.compile(r"^[A-R]{2}[0-9]{2}$")
 _GRID6 = re.compile(r"^[A-R]{2}[0-9]{2}[A-X]{2}$")
 _REPORT = re.compile(r"^R?[+-][0-9]{2}$")
 _CALL = re.compile(r"^[A-Z0-9/]{3,}$")
+# ARRL Field Day exchange: transmitter class (1..99 + A..F) and section.
+_FD_CLASS = re.compile(r"^[0-9]{1,2}[A-F]$")
+_FD_SECTION = re.compile(r"^(?:[A-Z]{2,3}|DX)$")
 
 
 def is_grid(tok: str) -> bool:
@@ -40,6 +43,14 @@ def is_grid(tok: str) -> bool:
 
 def is_report(tok: str) -> bool:
     return bool(_REPORT.match(tok))
+
+
+def is_fd_class(tok: str) -> bool:
+    return bool(_FD_CLASS.match(tok))
+
+
+def is_fd_section(tok: str) -> bool:
+    return bool(_FD_SECTION.match(tok))
 
 
 def is_call(tok: str) -> bool:
@@ -91,6 +102,8 @@ K_RREPORT = "RREPORT"
 K_RRR = "RRR"
 K_RR73 = "RR73"
 K_73 = "73"
+K_EXCH = "EXCH"          # Field Day exchange, e.g. "3A EMA"
+K_REXCH = "REXCH"        # rogered Field Day exchange, e.g. "R 3A EMA"
 K_FREE = "FREE"
 
 
@@ -100,9 +113,10 @@ class ParsedMessage:
     to: str = ""            # addressee callsign, or "CQ"
     de: str = ""            # sender callsign ("" if unknown)
     is_cq: bool = False
-    cq_dir: str = ""        # directional CQ target, e.g. "DX", "EU", "POTA"
+    cq_dir: str = ""        # directional CQ target, e.g. "DX", "EU", "POTA", "FD"
     grid: str = ""
     report: Optional[int] = None
+    exch: str = ""          # Field Day exchange "<class> <section>"
     kind: str = K_FREE
 
     @property
@@ -134,11 +148,24 @@ def parse(raw: str) -> ParsedMessage:
             pm.grid = rest[0]
         return pm
 
-    # Directed message: "<to> <de> [field]"
+    # Directed message: "<to> <de> [field...]"
     pm.to = toks[0]
     if len(toks) >= 2:
         pm.de = toks[1]
-    field = toks[2] if len(toks) >= 3 else ""
+    rest = toks[2:]
+    field = rest[0] if rest else ""
+
+    # Field Day exchange: "<to> <de> [R] <class> <section>", e.g.
+    # "K1ABC W9XYZ 3A EMA" or "K1ABC W9XYZ R 3A EMA".
+    fd = list(rest)
+    rogered = False
+    if fd and fd[0] == "R":
+        rogered = True
+        fd = fd[1:]
+    if len(fd) >= 2 and is_fd_class(fd[0]) and is_fd_section(fd[1]):
+        pm.exch = f"{fd[0]} {fd[1]}"
+        pm.kind = K_REXCH if rogered else K_EXCH
+        return pm
 
     if field == "RR73":
         pm.kind = K_RR73
@@ -184,6 +211,35 @@ def standard_messages(mycall: str, mygrid: str, dxcall: str,
     ]
 
 
+def field_day_messages(mycall: str, mygrid: str, dxcall: str,
+                       my_exch: str) -> list[str]:
+    """The six transmit messages for an ARRL Field Day QSO.
+
+    Field Day replaces the signal report with a contest exchange of
+    transmitter *class* and ARRL/RAC *section* (``my_exch`` = "3A EMA").
+    Both stations send the same kind of exchange, so there is no separate
+    report step::
+
+        CQ FD K1ABC FN42
+            K1ABC W9XYZ 6A WI          <- Tx1 (our exchange)
+        W9XYZ K1ABC R 2B EMA           <- Tx3 (roger + their exchange)
+            K1ABC W9XYZ RR73           <- Tx4
+    """
+    mycall = mycall.upper().strip()
+    dxcall = dxcall.upper().strip()
+    grid = mygrid.upper().strip()[:4]
+    g = f" {grid}" if grid else ""
+    ex = my_exch.upper().strip()
+    return [
+        f"{dxcall} {mycall} {ex}".strip(),       # Tx1: answer with exchange
+        f"{dxcall} {mycall} {ex}".strip(),       # Tx2: (no report; repeat exch)
+        f"{dxcall} {mycall} R {ex}".strip(),     # Tx3: roger + exchange
+        f"{dxcall} {mycall} RR73",               # Tx4: rogers
+        f"{dxcall} {mycall} 73",                 # Tx5: sign off
+        f"CQ FD {mycall}{g}".strip(),            # Tx6: call CQ FD
+    ]
+
+
 # --- sequencer state machine --------------------------------------------
 
 @dataclass
@@ -193,6 +249,7 @@ class LogRequest:
     dxgrid: str
     report_sent: int
     report_recv: Optional[int]
+    dxexch: str = ""        # Field Day: the exchange DX sent us
 
 
 @dataclass
@@ -200,10 +257,13 @@ class Sequencer:
     mycall: str = ""
     mygrid: str = ""
     use_rr73: bool = True
+    contest: str = ""                # "" for normal, "FD" for ARRL Field Day
+    my_exch: str = ""                # Field Day exchange we send, "3A EMA"
 
     # live QSO state
     dxcall: str = ""
     dxgrid: str = ""
+    dxexch: str = ""                 # exchange DX sent us (Field Day)
     report_out: int = 0             # what we send DX
     report_in: Optional[int] = None  # what DX sent us
     calling_cq: bool = True          # True when we are the CQ station
@@ -219,9 +279,18 @@ class Sequencer:
 
     def _regen(self) -> None:
         dx = self.dxcall or "DX"
-        self.messages = standard_messages(
-            self.mycall or "MYCALL", self.mygrid, dx, self.report_out,
-            self.use_rr73)
+        mycall = self.mycall or "MYCALL"
+        if self.contest == "FD":
+            if self.my_exch:
+                self.messages = field_day_messages(
+                    mycall, self.mygrid, dx, self.my_exch)
+            else:
+                # Field Day is inert until a class+section exchange is set:
+                # empty messages mean nothing is queued and nothing transmits.
+                self.messages = [""] * 6
+        else:
+            self.messages = standard_messages(
+                mycall, self.mygrid, dx, self.report_out, self.use_rr73)
 
     def set_station(self, mycall: str, mygrid: str) -> None:
         self.mycall, self.mygrid = mycall.upper(), mygrid.upper()
@@ -241,6 +310,7 @@ class Sequencer:
         self.calling_cq = True
         self.dxcall = ""
         self.dxgrid = ""
+        self.dxexch = ""
         self.report_in = None
         self.logged = False
         self.next_tx = 6
@@ -262,6 +332,7 @@ class Sequencer:
         self.calling_cq = calling_cq
         self.dxcall = base_call(dxcall)
         self.dxgrid = dxgrid
+        self.dxexch = ""
         self.report_out = int(round(report_out))
         self.report_in = None
         self.logged = False
@@ -308,9 +379,13 @@ class Sequencer:
             calling_cq = self._role_for_kind(pm.kind)
             self._begin(dxcall, pm.grid, snr, calling_cq)
             # A sane starting reply before the message-specific advance: the
-            # CQ station answers a caller with a report (Tx2); a caller
-            # answers a CQ with its grid (Tx1).
-            self.next_tx = 2 if calling_cq else 1
+            # CQ station answers a caller with a report (Tx2), or with the
+            # rogered exchange (Tx3) on Field Day; a caller answers a CQ with
+            # its grid/exchange (Tx1).
+            if calling_cq:
+                self.next_tx = 3 if self.contest == "FD" else 2
+            else:
+                self.next_tx = 1
         return self._advance(pm, snr)
 
     def _role_for_kind(self, kind: str) -> bool:
@@ -321,9 +396,9 @@ class Sequencer:
         the CQ station; a plain report or a roger means DX called CQ and we
         answered it.
         """
-        if kind in (K_GRID, K_RREPORT):
+        if kind in (K_GRID, K_RREPORT, K_EXCH):
             return True
-        if kind in (K_REPORT, K_RRR, K_RR73, K_73):
+        if kind in (K_REPORT, K_RRR, K_RR73, K_73, K_REXCH):
             return False
         return self.calling_cq
 
@@ -334,7 +409,20 @@ class Sequencer:
         DX; :meth:`on_decode` and :meth:`engage` enforce that.
         """
         log: Optional[LogRequest] = None
-        if pm.kind == K_GRID:
+        if pm.kind == K_EXCH:
+            # Field Day: DX sent its class/section. The CQ station replies with
+            # the rogered exchange (Tx3); a caller has already sent Tx1 and
+            # holds.
+            if pm.exch:
+                self.dxexch = pm.exch
+            if self.calling_cq:
+                self.next_tx = 3
+        elif pm.kind == K_REXCH:
+            # Field Day: DX rogered and sent its exchange -> we send RR73.
+            if pm.exch:
+                self.dxexch = pm.exch
+            self.next_tx = 4
+        elif pm.kind == K_GRID:
             if pm.grid:
                 self.dxgrid = pm.grid
             # Only the CQ station steps forward on a bare grid/answer; a
@@ -378,4 +466,4 @@ class Sequencer:
             return None
         self.logged = True
         return LogRequest(self.dxcall, self.dxgrid, self.report_out,
-                          self.report_in)
+                          self.report_in, self.dxexch)

@@ -370,3 +370,25 @@ def _qso_from_fields(f: dict) -> Qso:
         comment=f.get("comment", ""),
         extra=extra,
     )
+
+
+# --- per-day ADIF files -------------------------------------------------
+
+def daily_path(base_dir: Path, qso_date: str) -> Path:
+    """Path of the dated ADIF file for a QSO date (``YYYYMMDD``)."""
+    return Path(base_dir) / f"digiham_{qso_date}.adi"
+
+
+def append_qso_file(path: Path, q: Qso) -> None:
+    """Append one QSO to a standalone ADIF file, writing a header if new.
+
+    Used for the optional per-day log files: plain append-only ADIF written
+    alongside the main log. Raises OSError on write failure.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists() or path.stat().st_size == 0
+    with path.open("a") as f:
+        if new_file:
+            f.write(adif_header())
+        f.write(qso_to_adif(q) + "\n")

@@ -111,7 +111,13 @@ class Config:
     auto_seq: bool = True          # run the QSO state machine automatically
     call_first: bool = False       # answer the first caller after a CQ
     auto_log: bool = True          # log automatically on RR73/73
+    disable_tx_after_qso: bool = False  # turn Tx off once a QSO completes (73/RR73)
     tx_watchdog_min: int = 6       # halt Tx after N minutes of no reply (0 = off)
+
+    # --- Contest ---------------------------------------------------------
+    contest_mode: str = ""         # "" (normal) | "FD" (ARRL Field Day)
+    fd_class: str = "1D"           # Field Day transmitter class, e.g. 1D, 3A
+    fd_section: str = ""           # ARRL/RAC section, e.g. WI, EMA, DX
     double_click_qsy: bool = True  # double-click a decode sets Rx freq
     cq_only: bool = False          # band-activity filter: show CQ calls only
     hide_worked: bool = False      # band-activity filter: hide calls worked B4
@@ -142,6 +148,8 @@ class Config:
 
     # --- ADIF/log --------------------------------------------------------
     log_file: str = ""            # "" -> config_dir()/digiham_log.adi
+    adif_daily_files: bool = False  # also write a dated ADIF per operating day
+    adif_daily_dir: str = ""      # "" -> config_dir(); folder for the dated files
 
     # Free-form extras that we do not model explicitly.
     extra: dict = field(default_factory=dict)
@@ -152,6 +160,15 @@ class Config:
     def resolved_all_txt(self) -> Path:
         return Path(self.all_txt_file) if self.all_txt_file \
             else config_dir() / "ALL.TXT"
+
+    def resolved_daily_dir(self) -> Path:
+        return Path(self.adif_daily_dir) if self.adif_daily_dir else config_dir()
+
+    def fd_exchange(self) -> str:
+        """Field Day exchange ``"<class> <section>"`` (empty if incomplete)."""
+        cls = self.fd_class.strip().upper()
+        sect = self.fd_section.strip().upper()
+        return f"{cls} {sect}" if cls and sect else ""
 
     def save(self, path: Path | None = None) -> None:
         path = path or config_path()
