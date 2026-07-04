@@ -22,6 +22,8 @@ Hamlib's `rigctld`, and Qt 6 (PySide6).
   calls, new (unworked) stations, and messages addressed to you.
 - **Six standard Tx messages** with *Now/Next* selection plus a free-text
   slot, Hold Tx Freq, Lock Tx=Rx, Tx even/odd, and a Tx watchdog.
+- **WSJT-X UDP output** so companions like GridTracker and JTAlert can
+  follow digiham as if it were WSJT-X (decodes, status, and logged QSOs).
 - **Lots of settings**: station, radio, audio devices, decode depth &
   search window, behaviour toggles, and colours — all persisted to
   `~/.config/digiham/config.json`.
@@ -47,6 +49,15 @@ rigctld -m 3073 -r /dev/ttyUSB0 -s 115200
 
 Then tick **Enable rig control** in Settings → Radio (default
 `localhost:4532`).
+
+### GridTracker / JTAlert (WSJT-X UDP)
+
+In **Settings → Reporting**, tick **Broadcast WSJT-X UDP messages**.
+digiham then emits the same UDP datagrams WSJT-X does — heartbeat, status,
+decodes, and logged QSOs — so tools such as GridTracker or JTAlert can
+follow it. Point them at the configured host/port (WSJT-X's default is
+`127.0.0.1:2237`); use a multicast group address to feed several tools at
+once.
 
 ## How it fits together
 

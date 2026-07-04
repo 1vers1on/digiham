@@ -31,6 +31,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._audio_tab(), "Audio")
         tabs.addTab(self._decode_tab(), "Decoding")
         tabs.addTab(self._behaviour_tab(), "Behaviour")
+        tabs.addTab(self._reporting_tab(), "Reporting")
         tabs.addTab(self._colour_tab(), "Colours")
 
         buttons = QDialogButtonBox(
@@ -159,6 +160,28 @@ class SettingsDialog(QDialog):
         f.addRow("Tx watchdog (0 = off)", self.s_wd)
         return w
 
+    def _reporting_tab(self) -> QWidget:
+        w = QWidget()
+        f = QFormLayout(w)
+        self.c_udp = QCheckBox("Broadcast WSJT-X UDP messages")
+        self.c_udp.setChecked(self.cfg.udp_enabled)
+        self.e_udp_host = QLineEdit(self.cfg.udp_host)
+        self.e_udp_host.setPlaceholderText("127.0.0.1 or a multicast group")
+        self.s_udp_port = QSpinBox(); self.s_udp_port.setRange(1, 65535)
+        self.s_udp_port.setValue(self.cfg.udp_port)
+        self.e_udp_id = QLineEdit(self.cfg.udp_id)
+        self.e_udp_id.setPlaceholderText("digiham")
+        f.addRow(self.c_udp)
+        f.addRow("UDP server host", self.e_udp_host)
+        f.addRow("UDP server port", self.s_udp_port)
+        f.addRow("Instance id", self.e_udp_id)
+        note = QLabel("Sends the same UDP datagrams as WSJT-X so companions "
+                      "like GridTracker and JTAlert can follow digiham. Point "
+                      "them at this host/port (WSJT-X default is 2237).")
+        note.setWordWrap(True)
+        f.addRow(note)
+        return w
+
     def _colour_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
@@ -215,6 +238,10 @@ class SettingsDialog(QDialog):
         c.double_click_qsy = self.c_dcqsy.isChecked()
         c.cq_only = self.c_cqonly.isChecked()
         c.tx_watchdog_min = self.s_wd.value()
+        c.udp_enabled = self.c_udp.isChecked()
+        c.udp_host = self.e_udp_host.text().strip() or "127.0.0.1"
+        c.udp_port = self.s_udp_port.value()
+        c.udp_id = self.e_udp_id.text().strip() or "digiham"
         c.theme = self.cb_theme.currentText()
         c.waterfall_palette = self.cb_wf.currentText()
         c.waterfall_gain = self.s_wfg.value()

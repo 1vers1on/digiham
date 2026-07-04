@@ -26,6 +26,7 @@ from .audio import Capture, TxPlayer
 from .config import Config
 from .decoder import DecodeController
 from .rig import RigController
+from .wsjtx import WsjtxReporter
 from . import sequencer as seq
 
 
@@ -123,6 +124,7 @@ class RadioEngine(QObject):
         self.tx = TxPlayer(cfg.audio_out, cfg.tx_audio_level)
         self.decoder = DecodeController(self)
         self.rig = RigController(self)
+        self.reporter = WsjtxReporter(cfg, self)
 
         self._txing = False
         self._tx_cycle = -1
@@ -147,6 +149,7 @@ class RadioEngine(QObject):
         # wiring
         self.decoder.decoded.connect(self._on_decoded)
         self.decoder.busychanged.connect(self.decoderBusy)
+        self.decoder.busychanged.connect(lambda _b: self._report_status())
         self.decoder.failed.connect(self.statusMessage)
         self.rig.connected.connect(self._on_rig_connected)
         self.rig.telemetry.connect(self._on_rig_telemetry)
@@ -186,8 +189,10 @@ class RadioEngine(QObject):
             self.connect_rig()
         self._tick_timer.start()
         self._spec_timer.start()
+        self.reporter.start()
         self._emit_tx_messages()
         self._emit_seq_state()
+        self._report_status()
         self.freqChanged.emit(self.rx_freq, self.tx_freq)
         self.dialChanged.emit(self.dial_hz)
 
@@ -201,6 +206,7 @@ class RadioEngine(QObject):
         self.tx.stop()
         self.rig.shutdown()
         self.decoder.shutdown()
+        self.reporter.stop()
 
     def _start_capture(self) -> None:
         try:
@@ -254,6 +260,7 @@ class RadioEngine(QObject):
             self.rig.set_freq(self.dial_hz)
             if self.cfg.rig_mode:
                 self.rig.set_mode(self.cfg.rig_mode)
+        self._report_status()
         self.statusMessage.emit(f"{band}  {self.dial_hz/1e6:.6f} MHz")
 
     def set_rx_freq(self, hz: int) -> None:
@@ -276,6 +283,7 @@ class RadioEngine(QObject):
         if on:
             self._watchdog_deadline = time.time() + self.cfg.tx_watchdog_min * 60
         self.txEnableChanged.emit(on)
+        self._report_status()
         self.statusMessage.emit("Tx enabled" if on else "Tx disabled")
 
     def halt_tx(self) -> None:
@@ -391,6 +399,7 @@ class RadioEngine(QObject):
                 self.cfg.band = band
                 self.bandChanged.emit(band)
                 self.statusMessage.emit(f"rig QSY → {band}")
+            self._report_status()
         self.rigState.emit(True, dial, mode)
 
     # ------------------------------------------------------------------ #
@@ -408,6 +417,7 @@ class RadioEngine(QObject):
             self._cur_cycle = cycle
             self.newCycle.emit(cycle)
             self._prune(cycle)
+            self._report_status()
         self.cycleTick.emit(min(1.0, t / P), cycle)
 
         if self.capture:
@@ -531,6 +541,7 @@ class RadioEngine(QObject):
         if rows:
             self.decodesReady.emit(rows)
             for row in rows:
+                self.reporter.report_decode(row)
                 self._auto_sequence(row)
         self._pump_jobs()
 
@@ -631,6 +642,7 @@ class RadioEngine(QObject):
                 self.rig.set_split(True, self.dial_hz + split_offset)
             self.rig.set_ptt(True)
         self.txStateChanged.emit(True, msg)
+        self._report_status()
         self.statusMessage.emit(f"Tx: {msg}")
         try:
             self.tx.play(wave, on_done=lambda: self._txFinished.emit(idx))
@@ -682,6 +694,7 @@ class RadioEngine(QObject):
             self.rig.set_ptt(False)
         self._txing = False
         self.txStateChanged.emit(False, "")
+        self._report_status()
 
     # ------------------------------------------------------------------ #
     # logging
@@ -706,6 +719,7 @@ class RadioEngine(QObject):
             comment=f"{self.mode} {self.band}")
         if self.log.add(q):
             self.qsoLogged.emit(q)
+            self.reporter.report_qso(q)
             self.statusMessage.emit(f"logged {dxcall}")
         self._qso_time_on = None
 
@@ -741,11 +755,34 @@ class RadioEngine(QObject):
             "report_out": s.report_out, "report_in": s.report_in,
             "next_tx": s.next_tx})
 
+    def _report_status(self) -> None:
+        """Push a WSJT-X Status datagram reflecting current operating state."""
+        s = self.seq
+        self.reporter.report_status({
+            "dial_hz": self.dial_hz,
+            "mode": self.mode,
+            "dx_call": s.dxcall or "",
+            "report": seq.fmt_report(s.report_out) if s.dxcall else "",
+            "tx_mode": self.mode,
+            "tx_enabled": self.tx_enabled,
+            "transmitting": self._txing,
+            "decoding": self.decoder.busy,
+            "rx_df": self.rx_freq,
+            "tx_df": self.tx_freq,
+            "de_call": self.cfg.my_call or "",
+            "de_grid": self.cfg.my_grid or "",
+            "dx_grid": s.dxgrid or "",
+            "tr_period": int(self.period),
+            "tx_message": s.current_message() or "",
+        })
+
     def apply_config(self, cfg: Config) -> None:
         """Re-read settings that can change at runtime."""
         self.cfg = cfg
         self.seq.set_station(cfg.my_call, cfg.my_grid)
         self.seq.use_rr73 = True
         self.tx.level = cfg.tx_audio_level
+        self.reporter.apply_config(cfg)
         self._emit_tx_messages()
+        self._report_status()
         self.freqChanged.emit(self.rx_freq, self.tx_freq)

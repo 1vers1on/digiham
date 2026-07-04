@@ -82,6 +82,12 @@ class Config:
     # --- Reporting -------------------------------------------------------
     pskreporter: bool = False
 
+    # --- WSJT-X UDP output (GridTracker, JTAlert, …) ---------------------
+    udp_enabled: bool = False
+    udp_host: str = "127.0.0.1"    # unicast address or multicast group
+    udp_port: int = 2237           # WSJT-X default UDP server port
+    udp_id: str = "digiham"        # WSJT-X instance id companions key off
+
     # --- UI --------------------------------------------------------------
     theme: str = "Default Dark"    # key into gui.theme.available_themes()
     waterfall_palette: str = "blue"
