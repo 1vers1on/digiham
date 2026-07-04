@@ -7,13 +7,35 @@ widely-compatible subset understood by LoTW, QRZ, eQSL and Club Log.
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
-from dataclasses import dataclass, field, asdict
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+logger = logging.getLogger(__name__)
+
 APP_NAME = "digiham"
 APP_VERSION = "0.1.0"
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """Outcome of importing an ADIF file into the log."""
+    added: int = 0
+    duplicates: int = 0
+
+    @property
+    def read(self) -> int:
+        return self.added + self.duplicates
+
+    def summary(self) -> str:
+        msg = f"imported {self.added} new QSO" + ("s" if self.added != 1 else "")
+        if self.duplicates:
+            msg += f" ({self.duplicates} duplicate" \
+                   f"{'s' if self.duplicates != 1 else ''} skipped)"
+        return msg
 
 
 @dataclass
@@ -43,6 +65,14 @@ class Qso:
 def _adif_field(name: str, value: str) -> str:
     value = str(value)
     return f"<{name}:{len(value.encode('utf-8'))}>{value}"
+
+
+# Column order for CSV export.
+_CSV_COLS = [
+    "call", "qso_date", "time_on", "time_off", "band", "mode", "freq_mhz",
+    "rst_sent", "rst_rcvd", "gridsquare", "station_callsign", "my_gridsquare",
+    "tx_pwr_w", "comment",
+]
 
 
 # WSJT-X-style modes map to ADIF MODE plus SUBMODE.
@@ -128,7 +158,12 @@ class QsoLog:
                 f.write(adif_header())
 
     def add(self, q: Qso) -> bool:
-        """Append a QSO; returns False if it's a duplicate of a logged key."""
+        """Append a QSO; returns False if it's a duplicate of a logged key.
+
+        The record is committed to memory only after it is safely written to
+        disk, so a failed write (full disk, permissions, unplugged drive)
+        raises OSError without leaving the in-memory log out of sync.
+        """
         if q.key in self._keys:
             return False
         self._ensure_header()
@@ -137,6 +172,40 @@ class QsoLog:
         self.records.append(q)
         self._keys.add(q.key)
         return True
+
+    def import_adif(self, path: Path) -> ImportResult:
+        """Merge QSOs from an external ADIF file into the log.
+
+        Records already present (by call/date/time/band key) are skipped, as
+        are duplicates within the imported file itself. New records are
+        appended to the log file; nothing is committed to memory until the
+        write succeeds. Raises OSError if the source or log file can't be read
+        or written.
+        """
+        text = Path(path).read_text(errors="replace")
+        new: list[Qso] = []
+        seen_local: set[tuple] = set()
+        duplicates = 0
+        for q in parse_adif(text):
+            if not q.call:
+                continue
+            k = q.key
+            if k in self._keys or k in seen_local:
+                duplicates += 1
+                continue
+            seen_local.add(k)
+            new.append(q)
+        if new:
+            self._ensure_header()
+            with self.path.open("a") as f:
+                for q in new:
+                    f.write(qso_to_adif(q) + "\n")
+            for q in new:
+                self.records.append(q)
+                self._keys.add(q.key)
+        logger.info("imported %d QSOs (%d duplicates) from %s",
+                    len(new), duplicates, path)
+        return ImportResult(added=len(new), duplicates=duplicates)
 
     def worked_calls(self) -> set[str]:
         return {r.call.upper() for r in self.records}
@@ -188,6 +257,24 @@ class QsoLog:
             f.write(adif_header())
             for q in recs:
                 f.write(qso_to_adif(q) + "\n")
+        return len(recs)
+
+    def export_csv(self, path: Path, records: Optional[Iterable[Qso]] = None) -> int:
+        """Write the log as a spreadsheet-friendly CSV file."""
+        recs = list(records) if records is not None else self.records
+        with Path(path).open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([c.upper() for c in _CSV_COLS])
+            for q in recs:
+                w.writerow([
+                    q.call.upper(), q.qso_date, q.time_on, q.time_off,
+                    q.band, q.mode,
+                    f"{q.freq_mhz:.6f}".rstrip("0").rstrip("."),
+                    q.rst_sent, q.rst_rcvd, q.gridsquare,
+                    q.station_callsign.upper(), q.my_gridsquare,
+                    "" if q.tx_pwr_w is None else f"{q.tx_pwr_w:g}",
+                    q.comment,
+                ])
         return len(recs)
 
 

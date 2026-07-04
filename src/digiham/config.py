@@ -82,6 +82,19 @@ class Config:
                                    # PKTUSB is DATA-U/DATA-USB on the radio's panel
     ptt_method: str = "rigctld"   # rigctld | vox | none
 
+    # rigctld source: run our own private daemon or talk to an external one.
+    # When rig_managed is True, host/port above are ignored and digiham
+    # launches rigctld itself on a free loopback port.
+    rig_managed: bool = False
+    rigctld_path: str = ""        # "" = auto-locate the rigctld binary
+    rig_model: int = 1            # Hamlib model number (1 = Dummy; see rigctld -l)
+    # serial/USB device for the built-in rigctld:
+    #   "auto" -> auto-detect the radio's USB-serial port (survives replug)
+    #   ""     -> none (network / SDR rigs that need no serial port)
+    #   else   -> an explicit path, e.g. /dev/ttyUSB0 or COM3
+    rig_device: str = "auto"
+    rig_baud: int = 0             # serial speed (0 = rigctld/backend default)
+
     # --- Decoding --------------------------------------------------------
     decode_depth: int = 3
     freq_min: int = 200

@@ -21,7 +21,17 @@ Two hard-won lessons are baked in here:
 
 from __future__ import annotations
 
+import logging
+import os
+import shutil
 import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # RPRT status codes, from Hamlib's rig.h (RIG_OK / RIG_E*).
 _RIG_ERRORS = {
@@ -340,3 +350,325 @@ class RigctlClient:
 
     def set_ts(self, ts: int, vfo: str | None = None) -> None:
         self._raw_command(f"N{self._vfo_suffix(vfo)} {ts}")
+
+
+# ---------------------------------------------------------------------------
+# Managed rigctld: launch and supervise a private daemon.
+#
+# digiham can either talk to a rigctld the user started themselves (the
+# "external" case) or run its own. The pieces below implement the latter:
+# locate the rigctld binary across platforms, pick a loopback port nothing
+# else is using, start the daemon, wait for it to listen, and shut it down.
+# ---------------------------------------------------------------------------
+
+RIGCTLD_EXE = "rigctld.exe" if sys.platform == "win32" else "rigctld"
+
+
+class RigctldStartError(Exception):
+    """Raised when a managed rigctld process cannot be started."""
+
+
+def _extra_search_dirs() -> list[Path]:
+    """Platform-specific directories to search beyond ``PATH``.
+
+    Hamlib's installer and the common package managers drop rigctld in a
+    handful of predictable places that are not always on a GUI app's
+    inherited ``PATH`` (especially on macOS and Windows).
+    """
+    if sys.platform == "win32":
+        dirs: list[Path] = []
+        for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+            base = os.environ.get(env)
+            if base:
+                # Hamlib's Windows build unpacks to <name>-<ver>\bin
+                dirs.append(Path(base) / "hamlib" / "bin")
+                dirs.append(Path(base) / "Hamlib" / "bin")
+        return dirs
+    if sys.platform == "darwin":
+        return [
+            Path("/opt/homebrew/bin"),   # Homebrew on Apple silicon
+            Path("/usr/local/bin"),      # Homebrew on Intel / manual builds
+            Path("/opt/local/bin"),      # MacPorts
+        ]
+    # Linux, *BSD and anything else.
+    return [
+        Path("/usr/bin"), Path("/usr/local/bin"), Path("/bin"),
+        Path("/usr/sbin"), Path("/usr/local/sbin"),
+    ]
+
+
+def find_rigctld(explicit: str = "") -> str:
+    """Locate the rigctld executable and return its path.
+
+    Search order:
+
+    1. *explicit* — a user-supplied path. It may point at the binary
+       itself or at the directory containing it.
+    2. ``PATH`` via :func:`shutil.which`.
+    3. A handful of platform-specific install locations
+       (see :func:`_extra_search_dirs`).
+
+    Raises :class:`FileNotFoundError` if nothing is found.
+    """
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_dir():
+            p = p / RIGCTLD_EXE
+        found = shutil.which(str(p))   # honours PATHEXT on Windows, checks +x
+        if found:
+            return found
+        raise FileNotFoundError(f"rigctld not found at {explicit!r}")
+
+    found = shutil.which(RIGCTLD_EXE)
+    if found:
+        return found
+    for d in _extra_search_dirs():
+        cand = d / RIGCTLD_EXE
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    raise FileNotFoundError(
+        "rigctld not found on PATH or in the usual locations; install Hamlib "
+        "or set the rigctld path in Settings")
+
+
+def _free_port(host: str = "127.0.0.1") -> int:
+    """Return a TCP port on *host* that is currently unused.
+
+    The OS assigns a free port when we bind to port 0; we hand it straight
+    to rigctld. There is a small window between closing this socket and
+    rigctld binding the port, but on loopback that race is negligible and
+    this is the standard way to reserve an ephemeral port.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, 0))
+        return s.getsockname()[1]
+
+
+class ManagedRigctld:
+    """A rigctld subprocess owned and supervised by digiham.
+
+    Usage::
+
+        rigctld = ManagedRigctld(model=1035, device="/dev/ttyUSB0")
+        host, port = rigctld.start()
+        with RigctlClient(host, port) as rig:
+            ...
+        rigctld.stop()
+
+    or as a context manager::
+
+        with ManagedRigctld(model=1) as (host, port):
+            ...
+    """
+
+    def __init__(
+        self,
+        model: int,
+        device: str = "",
+        baud: int = 0,
+        *,
+        rigctld_path: str = "",
+        host: str = "127.0.0.1",
+        extra_args: list[str] | None = None,
+    ) -> None:
+        self.model = model
+        self.device = device
+        self.baud = baud
+        self.rigctld_path = rigctld_path
+        self.host = host
+        self.extra_args = list(extra_args or [])
+        self.port = 0
+        self._proc: subprocess.Popen | None = None
+        self._log: tempfile.SpooledTemporaryFile | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self, timeout: float = 10.0) -> tuple[str, int]:
+        """Launch rigctld and block until it is listening.
+
+        Returns the ``(host, port)`` to connect to. Idempotent: if the
+        daemon is already running the existing address is returned.
+        """
+        if self.running:
+            return self.host, self.port
+
+        exe = find_rigctld(self.rigctld_path)
+        self.port = _free_port(self.host)
+        cmd = [exe, "-m", str(self.model),
+               "-T", self.host, "-t", str(self.port)]
+        if self.device:
+            cmd += ["-r", self.device]
+        if self.baud:
+            cmd += ["-s", str(self.baud)]
+        cmd += self.extra_args
+
+        # rigctld is chatty and long-lived; send its output to a temp file so
+        # a full pipe buffer can never block it, and so we can quote it back
+        # if it dies during startup.
+        self._log = tempfile.SpooledTemporaryFile(max_size=1 << 16, mode="w+b")
+        # Detach from our process group so a Ctrl-C to digiham does not race
+        # our own terminate(); on Windows the equivalent flag does the same.
+        kwargs: dict = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+
+        logger.info("starting rigctld: %s", " ".join(cmd))
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdout=self._log, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, **kwargs)
+        except OSError as e:
+            self._close_log()
+            raise RigctldStartError(f"could not launch {exe}: {e}") from e
+
+        try:
+            self._wait_ready(timeout)
+        except Exception:
+            self.stop()
+            raise
+        return self.host, self.port
+
+    def _wait_ready(self, timeout: float) -> None:
+        assert self._proc is not None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                raise RigctldStartError(
+                    f"rigctld exited during startup (code {self._proc.returncode})"
+                    f"{self._log_tail()}")
+            try:
+                with socket.create_connection((self.host, self.port), timeout=0.5):
+                    logger.info("rigctld listening on %s:%s", self.host, self.port)
+                    return
+            except OSError:
+                time.sleep(0.1)
+        raise RigctldStartError(
+            f"rigctld did not start listening on {self.host}:{self.port} "
+            f"within {timeout:g}s{self._log_tail()}")
+
+    def _log_tail(self, limit: int = 500) -> str:
+        """Return the tail of rigctld's captured output for error messages."""
+        if self._log is None:
+            return ""
+        try:
+            self._log.seek(0)
+            data = self._log.read()
+        except (OSError, ValueError):
+            return ""
+        text = data.decode("utf-8", "replace").strip()
+        if not text:
+            return ""
+        return ": " + text[-limit:]
+
+    def _close_log(self) -> None:
+        if self._log is not None:
+            try:
+                self._log.close()
+            except OSError:
+                pass
+            self._log = None
+
+    def stop(self) -> None:
+        """Terminate the daemon (if running) and release its resources."""
+        proc = self._proc
+        self._proc = None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                logger.warning("rigctld did not exit; killing it")
+                proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+        self._close_log()
+
+    def __enter__(self) -> tuple[str, int]:
+        return self.start()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+
+# ---------------------------------------------------------------------------
+# Rig model catalogue (rigctld -l)
+# ---------------------------------------------------------------------------
+
+# The status words Hamlib prints in the second-to-last column; used to find
+# the column boundary because both the manufacturer and model names contain
+# spaces and so can't be split on whitespace reliably.
+_RIG_STATUS = {"Alpha", "Untested", "Beta", "Stable"}
+
+
+class RigModel:
+    """One entry from ``rigctld -l``: a selectable radio backend."""
+
+    __slots__ = ("id", "name", "status")
+
+    def __init__(self, id: int, name: str, status: str) -> None:
+        self.id = id
+        self.name = name        # "Yaesu FTDX-10", "Hamlib Dummy", …
+        self.status = status    # Stable / Beta / Alpha / Untested
+
+    def __repr__(self) -> str:
+        return f"RigModel({self.id}, {self.name!r}, {self.status!r})"
+
+
+_MODELS_CACHE: list[RigModel] | None = None
+
+
+def _parse_model_line(line: str) -> RigModel | None:
+    tokens = line.split()
+    if len(tokens) < 5 or not tokens[0].isdigit():
+        return None
+    # scan from the right for the Status column; Version sits just left of it
+    # and the manufacturer+model text is everything between the id and Version.
+    for i in range(len(tokens) - 1, 0, -1):
+        if tokens[i] in _RIG_STATUS:
+            name = " ".join(tokens[1:i - 1])
+            if not name:
+                return None
+            return RigModel(int(tokens[0]), name, tokens[i])
+    return None
+
+
+def list_rig_models(rigctld_path: str = "", refresh: bool = False) -> list[RigModel]:
+    """Return the radios this Hamlib build supports, via ``rigctld -l``.
+
+    The result is cached (the catalogue can't change without swapping the
+    binary). Returns an empty list, rather than raising, if rigctld can't
+    be found or run — callers fall back to a plain model-number entry.
+    """
+    global _MODELS_CACHE
+    if _MODELS_CACHE is not None and not refresh:
+        return _MODELS_CACHE
+    try:
+        exe = find_rigctld(rigctld_path)
+        out = subprocess.run(
+            [exe, "-l"], capture_output=True, text=True, timeout=10, check=True)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as e:
+        logger.warning("could not list rig models: %s", e)
+        return []
+    models: list[RigModel] = []
+    for line in out.stdout.splitlines():
+        m = _parse_model_line(line)
+        if m is not None:
+            models.append(m)
+    models.sort(key=lambda m: m.id)
+    _MODELS_CACHE = models
+    return models
+
+
+def rig_model_name(model_id: int, rigctld_path: str = "") -> str:
+    """Human name for a model id, or ``"model <id>"`` if unknown."""
+    for m in list_rig_models(rigctld_path):
+        if m.id == model_id:
+            return m.name
+    return f"model {model_id}"

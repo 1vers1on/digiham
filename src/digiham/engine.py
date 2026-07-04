@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 from . import bands
 from . import dxcc
 from . import geo
+from . import serialports
 from .adif import Qso, QsoLog
 from .audio import Capture, TxPlayer
 from .config import Config
 from .decoder import DecodeController
-from .rig import RigController
+from .rig import RigConnect, RigController
 from .spotlog import SpotLog
 from .wsjtx import WsjtxReporter
 from . import sequencer as seq
@@ -156,6 +157,9 @@ class RadioEngine(QObject):
         self._rig_poll_t = 0.0
         self._rig_want = False        # user wants the rig connected
         self._rig_retry_t = 0.0
+        self._rig_dev_check_t = 0.0   # last serial-port presence scan
+        self._rig_dev_ready = False   # is the managed rig's device present?
+        self._rig_waiting = False     # currently waiting for a device to appear
         self.monitoring = True
 
         # wiring
@@ -407,17 +411,69 @@ class RadioEngine(QObject):
     # rig
     # ------------------------------------------------------------------ #
 
+    def _rig_connect_settings(self) -> RigConnect:
+        return RigConnect(
+            host=self.cfg.rig_host, port=self.cfg.rig_port,
+            split=self.cfg.rig_split, mode=self.cfg.rig_mode,
+            managed=self.cfg.rig_managed, model=self.cfg.rig_model,
+            device=self.cfg.rig_device, baud=self.cfg.rig_baud,
+            rigctld_path=self.cfg.rigctld_path)
+
     def connect_rig(self) -> None:
         self._rig_want = True
-        self._rig_retry_t = time.time()
-        logger.info("connecting rig at %s:%s", self.cfg.rig_host, self.cfg.rig_port)
-        self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
-                             self.cfg.rig_split, self.cfg.rig_mode)
+        # let the tick drive the actual attempt: for a managed rig it first
+        # checks the serial device is present, so a not-yet-plugged-in radio
+        # waits quietly instead of failing on a loop.
+        self._rig_retry_t = 0.0
+        self._rig_dev_check_t = 0.0
+        self._rig_waiting = False
+        if self.cfg.rig_managed:
+            logger.info("connecting rig via managed rigctld (model %s)",
+                        self.cfg.rig_model)
+        else:
+            logger.info("connecting rig at %s:%s",
+                        self.cfg.rig_host, self.cfg.rig_port)
 
     def disconnect_rig(self) -> None:
         self._rig_want = False
+        self._rig_waiting = False
         logger.info("disconnecting rig")
         self.rig.disconnect_rig()
+
+    def _rig_device_ready(self, now: float) -> bool:
+        """Whether a managed rig's serial device is present (throttled scan).
+
+        Network/SDR rigs need no serial port and are always "ready". For a
+        real radio this gates connection attempts on the port being plugged
+        in, and flips the app into a quiet "waiting" state until it is.
+        """
+        if now - self._rig_dev_check_t < 1.5:
+            return self._rig_dev_ready
+        self._rig_dev_check_t = now
+        device, needs = serialports.resolve_device(self.cfg.rig_device)
+        ready = (not needs) or bool(device and serialports.port_exists(device))
+        if ready and self._rig_waiting:
+            self._rig_waiting = False
+            self._rig_retry_t = 0.0    # reconnect immediately on this tick
+            self.statusMessage.emit("rig: device detected, connecting…")
+        elif not ready and not self._rig_waiting:
+            self._rig_waiting = True
+            self.statusMessage.emit(
+                f"rig: waiting for {self.cfg.rig_device} to be connected…")
+        self._rig_dev_ready = ready
+        return ready
+
+    def _maybe_reconnect_rig(self, now: float) -> None:
+        if self.cfg.rig_managed and not self._rig_device_ready(now):
+            return
+        if now - self._rig_retry_t < 5.0:
+            return
+        first = self._rig_retry_t == 0.0
+        self._rig_retry_t = now
+        if not first:
+            logger.warning("rig reconnecting")
+        self.statusMessage.emit("rig: connecting…" if first else "rig: reconnecting…")
+        self.rig.connect_rig(self._rig_connect_settings())
 
     def _on_rig_connected(self, ok: bool, msg: str) -> None:
         logger.info("rig connection %s: %s", "ok" if ok else "failed", msg)
@@ -466,13 +522,8 @@ class RadioEngine(QObject):
         if now - self._rig_poll_t > 1.0 and self.rig.is_connected:
             self._rig_poll_t = now
             self.rig.poll()
-        if self._rig_want and not self.rig.is_connected \
-                and now - self._rig_retry_t > 10.0:
-            self._rig_retry_t = now
-            logger.warning("rig reconnecting")
-            self.statusMessage.emit("rig: reconnecting…")
-            self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
-                                 self.cfg.rig_split, self.cfg.rig_mode)
+        if self._rig_want and not self.rig.is_connected:
+            self._maybe_reconnect_rig(now)
 
         if self.monitoring:
             self._schedule_decodes(cycle, cstart, t)
@@ -514,7 +565,14 @@ class RadioEngine(QObject):
         attempts = _RT_ATTEMPTS[self.mode]
         if self._rt_next >= len(attempts) or t < attempts[self._rt_next]:
             return
-        avail = self.capture.read_period(cstart, min(t, self.period))
+        # Only read as much of the in-progress cycle as has actually been
+        # captured: the ring buffer lags wall time by the device latency, so
+        # requesting up to `t` would ask for samples past the capture head
+        # and read_period would return None every time (starving the decoder).
+        want = min(t, self.period, self.capture.available(cstart))
+        if want <= 0:
+            return
+        avail = self.capture.read_period(cstart, want)
         if avail is None or len(avail) <= self._rt_fed:
             return
         fmin, fmax = self._decode_window()
@@ -529,9 +587,13 @@ class RadioEngine(QObject):
         }
         if self.decoder.submit(job):
             self._rt_fed = len(avail)
-            # advance past every attempt time this block already covered
+            # Advance past every attempt the audio we actually fed now covers.
+            # Under latency the buffered audio can trail `t`, so gate on the
+            # fed duration (which drives the worker decoder's attempt schedule)
+            # rather than `t`; a shortfall simply retries on the next tick.
+            fed_t = len(avail) / ft8lib.SAMPLE_RATE
             while (self._rt_next < len(attempts)
-                   and t >= attempts[self._rt_next]):
+                   and fed_t >= attempts[self._rt_next]):
                 self._rt_next += 1
 
     def _queue_decode(self, cycle: int, cstart: float, length: float, tag: str) -> None:
@@ -870,7 +932,13 @@ class RadioEngine(QObject):
             my_gridsquare=self.cfg.my_grid,
             tx_pwr_w=round(10 ** ((self.cfg.tx_power_dbm - 30) / 10), 2),
             comment=f"{self.mode} {self.band}")
-        if self.log.add(q):
+        try:
+            added = self.log.add(q)
+        except OSError as e:
+            logger.error("failed to write QSO for %s to the log: %s", dxcall, e)
+            self.statusMessage.emit(f"log write failed: {e}")
+            return
+        if added:
             self.qsoLogged.emit(q)
             self.reporter.report_qso(q)
             self.statusMessage.emit(f"logged {dxcall}")

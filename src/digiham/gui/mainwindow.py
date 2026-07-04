@@ -59,6 +59,8 @@ class MainWindow(QMainWindow):
         m_file = mb.addMenu("&File")
         act_export = QAction("Export ADIF…", self)
         act_export.triggered.connect(self._export_adif)
+        act_import = QAction("Import ADIF…", self)
+        act_import.triggered.connect(self._import_adif)
         act_log = QAction("View log…", self)
         act_log.triggered.connect(self._show_log)
         act_settings = QAction("Settings…", self)
@@ -68,6 +70,7 @@ class MainWindow(QMainWindow):
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
         m_file.addAction(act_export)
+        m_file.addAction(act_import)
         m_file.addAction(act_log)
         m_file.addSeparator()
         m_file.addAction(act_settings)
@@ -666,6 +669,21 @@ class MainWindow(QMainWindow):
         if path:
             n = self.engine.log.export(path)
             self.statusBar().showMessage(f"exported {n} QSOs → {path}", 6000)
+
+    def _import_adif(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import ADIF", "", "ADIF (*.adi *.adif);;All files (*)")
+        if not path:
+            return
+        try:
+            result = self.engine.log.import_adif(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Import failed", str(e))
+            return
+        if self._log_window is not None:
+            self._log_window.refresh()
+        self.statusBar().showMessage(result.summary(), 8000)
+        QMessageBox.information(self, "Import complete", result.summary().capitalize())
 
     def _show_log(self) -> None:
         if self._log_window is None:

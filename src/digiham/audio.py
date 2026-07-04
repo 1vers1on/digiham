@@ -174,6 +174,22 @@ class Capture:
                 return self._buf[a:b].copy()
             return np.concatenate((self._buf[a:], self._buf[:b]))
 
+    def available(self, utc_start: float) -> float:
+        """Seconds of audio actually captured from *utc_start* to the head.
+
+        The ring buffer lags wall-clock time by the device latency plus the
+        current block, so for the in-progress cycle less audio is buffered
+        than ``now - utc_start`` implies. Callers streaming the live cycle
+        must clamp their read length to this, or :meth:`read_period` asks for
+        samples past the capture head and returns ``None``.
+        """
+        if self._t0 is None:
+            return 0.0
+        with self._lock:
+            n = self._n
+        k0 = int(round((utc_start - self._t0) * self.fs))
+        return max(0, n - k0) / self.fs
+
     def read_period(self, utc_start: float, seconds: float) -> Optional[np.ndarray]:
         """Return 12 kHz samples for the window starting at *utc_start*."""
         if self._t0 is None:

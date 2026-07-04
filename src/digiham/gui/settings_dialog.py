@@ -6,14 +6,16 @@ import dataclasses
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..config import Config
 from ..rigctl import normalize_mode
 from .. import audio
+from .. import rigctl as rigctld
+from .. import serialports
 from .waterfall import COLORMAP_NAMES
 from .theme import available_themes, DEFAULT_THEME
 
@@ -22,7 +24,7 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg: Config, parent=None):
         super().__init__(parent)
         self.setWindowTitle("digiham — Settings")
-        self.setMinimumWidth(520)
+        self.setMinimumSize(620, 560)
         self.cfg = dataclasses.replace(cfg)   # edit a copy
 
         tabs = QTabWidget()
@@ -68,9 +70,55 @@ class SettingsDialog(QDialog):
         f = QFormLayout(w)
         self.c_rig = QCheckBox("Enable rig control (rigctld)")
         self.c_rig.setChecked(self.cfg.rig_enabled)
+
+        # rigctld source: our own private daemon, or one the user runs.
+        self.c_managed = QCheckBox("Run a private rigctld (built-in)")
+        self.c_managed.setChecked(self.cfg.rig_managed)
+
+        # -- external rigctld -------------------------------------------------
         self.e_host = QLineEdit(self.cfg.rig_host)
         self.s_port = QSpinBox(); self.s_port.setRange(1, 65535)
         self.s_port.setValue(self.cfg.rig_port)
+
+        # -- built-in rigctld -------------------------------------------------
+        # Rig model: a searchable dropdown of everything this Hamlib knows,
+        # read live from `rigctld -l`. Editable so a model number can also be
+        # typed, and so the list still works if rigctld can't be found.
+        self.cb_model = QComboBox()
+        self.cb_model.setEditable(True)
+        self.cb_model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._populate_models()
+        completer = self.cb_model.completer()
+        if completer is not None:
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+
+        # Serial device: dropdown of live ports, plus Auto-detect / None, with
+        # a Refresh button. Editable so a custom path can be typed too.
+        self.cb_device = QComboBox()
+        self.cb_device.setEditable(True)
+        self.cb_device.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._populate_ports()
+        b_refresh = QPushButton("Refresh")
+        b_refresh.clicked.connect(self._populate_ports)
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(self.cb_device, 1); dev_row.addWidget(b_refresh)
+        dev_w = QWidget(); dev_w.setLayout(dev_row)
+        dev_w.setContentsMargins(0, 0, 0, 0)
+
+        self.s_baud = QSpinBox(); self.s_baud.setRange(0, 921600)
+        self.s_baud.setValue(self.cfg.rig_baud)
+        self.s_baud.setSpecialValueText("(default)")
+        self.e_path = QLineEdit(self.cfg.rigctld_path)
+        self.e_path.setPlaceholderText("auto-locate rigctld")
+        b_browse = QPushButton("Browse…")
+        b_browse.clicked.connect(self._browse_rigctld)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.e_path); path_row.addWidget(b_browse)
+        path_w = QWidget(); path_w.setLayout(path_row)
+        path_w.setContentsMargins(0, 0, 0, 0)
+
         self.c_split = QCheckBox("Use split (Tx on VFO B)")
         self.c_split.setChecked(self.cfg.rig_split)
         self.cb_mode = QComboBox()
@@ -85,13 +133,81 @@ class SettingsDialog(QDialog):
         self.cb_ptt = QComboBox()
         self.cb_ptt.addItems(["rigctld", "vox", "none"])
         self.cb_ptt.setCurrentText(self.cfg.ptt_method)
+
         f.addRow(self.c_rig)
+        f.addRow(self.c_managed)
         f.addRow("rigctld host", self.e_host)
         f.addRow("rigctld port", self.s_port)
+        f.addRow("Rig model", self.cb_model)
+        f.addRow("Rig device", dev_w)
+        f.addRow("Serial speed", self.s_baud)
+        f.addRow("rigctld binary", path_w)
         f.addRow("Rig mode on connect", self.cb_mode)
         f.addRow("PTT method", self.cb_ptt)
         f.addRow(self.c_split)
+
+        # keep the two sources' fields visibly separated
+        self._managed_rows = [self.cb_model, dev_w, self.s_baud, path_w]
+        self._external_rows = [self.e_host, self.s_port]
+        self.c_managed.toggled.connect(self._sync_rig_source)
+        self._sync_rig_source(self.c_managed.isChecked())
         return w
+
+    def _populate_models(self) -> None:
+        """Fill the rig-model dropdown from `rigctld -l` (id stored as data)."""
+        self.cb_model.clear()
+        models = rigctld.list_rig_models(self.cfg.rigctld_path)
+        for m in models:
+            suffix = "" if m.status == "Stable" else f"  [{m.status}]"
+            self.cb_model.addItem(f"{m.name}  (#{m.id}){suffix}", m.id)
+        idx = self.cb_model.findData(self.cfg.rig_model)
+        if idx >= 0:
+            self.cb_model.setCurrentIndex(idx)
+        else:
+            # unknown id, or rigctld not found: show the raw model number
+            self.cb_model.setEditText(str(self.cfg.rig_model))
+
+    def _selected_model(self) -> int:
+        """Model id from the dropdown: stored data if a row is selected,
+        otherwise the first integer found in whatever the user typed."""
+        idx = self.cb_model.findText(self.cb_model.currentText())
+        data = self.cb_model.itemData(idx) if idx >= 0 else None
+        if isinstance(data, int):
+            return data
+        digits = "".join(c for c in self.cb_model.currentText() if c.isdigit())
+        return int(digits) if digits else self.cfg.rig_model
+
+    def _populate_ports(self) -> None:
+        """(Re)scan serial ports and fill the device dropdown."""
+        current = self._selected_device() if self.cb_device.count() else self.cfg.rig_device
+        self.cb_device.clear()
+        self.cb_device.addItem("Auto-detect (USB serial)", serialports.AUTO)
+        self.cb_device.addItem("None (network / SDR rig)", "")
+        for p in serialports.list_ports():
+            self.cb_device.addItem(p.label, p.device)
+        idx = self.cb_device.findData(current)
+        if idx >= 0:
+            self.cb_device.setCurrentIndex(idx)
+        else:
+            self.cb_device.setEditText(current or serialports.AUTO)
+
+    def _selected_device(self) -> str:
+        idx = self.cb_device.findText(self.cb_device.currentText())
+        data = self.cb_device.itemData(idx) if idx >= 0 else None
+        if isinstance(data, str):
+            return data
+        return self.cb_device.currentText().strip()
+
+    def _sync_rig_source(self, managed: bool) -> None:
+        for wdg in self._managed_rows:
+            wdg.setEnabled(managed)
+        for wdg in self._external_rows:
+            wdg.setEnabled(not managed)
+
+    def _browse_rigctld(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Locate rigctld", self.e_path.text())
+        if path:
+            self.e_path.setText(path)
 
     def _audio_tab(self) -> QWidget:
         w = QWidget()
@@ -238,8 +354,13 @@ class SettingsDialog(QDialog):
         c.my_grid = self.e_grid.text().strip().upper()
         c.tx_power_dbm = self.s_pwr.value()
         c.rig_enabled = self.c_rig.isChecked()
+        c.rig_managed = self.c_managed.isChecked()
         c.rig_host = self.e_host.text().strip() or "localhost"
         c.rig_port = self.s_port.value()
+        c.rig_model = self._selected_model()
+        c.rig_device = self._selected_device()
+        c.rig_baud = self.s_baud.value()
+        c.rigctld_path = self.e_path.text().strip()
         c.rig_split = self.c_split.isChecked()
         c.rig_mode = self.cb_mode.currentText()
         c.ptt_method = self.cb_ptt.currentText()

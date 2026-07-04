@@ -17,12 +17,35 @@ computes that offset; this module just applies it.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
 
-from .rigctl import RigctlClient, RigctldError, normalize_mode
+from . import serialports
+from .rigctl import (
+    ManagedRigctld, RigctlClient, RigctldError, RigctldStartError, normalize_mode,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RigConnect:
+    """Everything the worker needs to bring a rig connection up.
+
+    Bundled into one object so it can ride a single Qt signal instead of a
+    long positional argument list.
+    """
+    host: str = "localhost"
+    port: int = 4532
+    split: bool = True
+    mode: str = ""
+    # managed (private) rigctld — when set, host/port are chosen by us
+    managed: bool = False
+    model: int = 1
+    device: str = ""
+    baud: int = 0
+    rigctld_path: str = ""
 
 # Hamlib level names for the meters we poll, keyed by the name used in the
 # meters dict. Split by when they are meaningful.
@@ -41,23 +64,45 @@ class _RigWorker(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._client: RigctlClient | None = None
+        self._managed: ManagedRigctld | None = None
         self._split = False
         self._mode = ""
         self._meter_names: dict[str, str] = {}
         self._poll_fails = 0
 
-    @Slot(str, int, bool, str)
-    def do_connect(self, host: str, port: int, split: bool, mode: str) -> None:
-        self._split = split
-        self._mode = mode
+    @Slot(object)
+    def do_connect(self, req: RigConnect) -> None:
+        self._split = req.split
+        self._mode = req.mode
         self._poll_fails = 0
+        # clear out any daemon/client left over from a previous attempt
+        self._stop_managed()
+
+        host, port = req.host, req.port
+        if req.managed:
+            device, needs = serialports.resolve_device(req.device)
+            if needs and not device:
+                # "auto" but nothing suitable is plugged in yet
+                self.connected.emit(False, "no serial device found")
+                return
+            try:
+                self._managed = ManagedRigctld(
+                    req.model, device, req.baud,
+                    rigctld_path=req.rigctld_path)
+                host, port = self._managed.start()
+            except (OSError, RigctldStartError) as e:
+                self._stop_managed()
+                logger.exception("failed to start managed rigctld")
+                self.connected.emit(False, f"rigctld: {e}")
+                return
+
         try:
             logger.info("connecting to rigctld at %s:%s", host, port)
             self._client = RigctlClient(host, port)
             self._client.connect()
-            if mode:
+            if req.mode:
                 try:
-                    self._ensure_mode(mode)
+                    self._ensure_mode(req.mode)
                 except (RigctldError, ValueError) as e:
                     logger.warning("failed to set rig mode during connect: %s", e)
                     self.failed.emit(f"set mode: {e}")
@@ -68,8 +113,14 @@ class _RigWorker(QObject):
             self.telemetry.emit(freq, real_mode, False)
         except (OSError, RigctldError, ValueError) as e:
             self._client = None
+            self._stop_managed()
             logger.exception("rig connection failed")
             self.connected.emit(False, str(e))
+
+    def _stop_managed(self) -> None:
+        if self._managed is not None:
+            self._managed.stop()
+            self._managed = None
 
     def _discover_meters(self) -> None:
         """Probe once which meters this rig can report."""
@@ -91,6 +142,7 @@ class _RigWorker(QObject):
                 pass
             self._client.close()
             self._client = None
+        self._stop_managed()
         logger.info("rig disconnected")
         self.connected.emit(False, "disconnected")
 
@@ -197,6 +249,7 @@ class _RigWorker(QObject):
             except Exception:
                 pass
             self._client = None
+        self._stop_managed()
         self.connected.emit(False, msg)
 
 
@@ -209,7 +262,7 @@ class RigController(QObject):
     meters = Signal(object)
     failed = Signal(str)
 
-    _req_connect = Signal(str, int, bool, str)
+    _req_connect = Signal(object)
     _req_disconnect = Signal()
     _req_set_freq = Signal(float)
     _req_set_mode = Signal(str)
@@ -251,8 +304,8 @@ class RigController(QObject):
 
     # -- public API (thread-safe, queued) --------------------------------
 
-    def connect_rig(self, host: str, port: int, split: bool, mode: str) -> None:
-        self._req_connect.emit(host, port, split, mode)
+    def connect_rig(self, req: RigConnect) -> None:
+        self._req_connect.emit(req)
 
     def disconnect_rig(self) -> None:
         self._req_disconnect.emit()
