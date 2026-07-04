@@ -18,11 +18,13 @@ def _configure_logging() -> None:
 
 
 def main() -> None:
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from . import config
     from .gui.mainwindow import MainWindow
     from .gui.theme import apply_theme
+    from .resources import icon_path
 
     _configure_logging()
     log = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("digiham")
     app.setOrganizationName("digiham")
+    app.setWindowIcon(QIcon(icon_path()))
     apply_theme(app, cfg.font_size, cfg.theme)
 
     # let Ctrl-C in a terminal close the app cleanly

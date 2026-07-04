@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=digiham
+GenericName=FT8/FT4/WSPR frontend
+Comment=Amateur radio digital-mode operating frontend
+Exec=digiham
+Icon=digiham
+Terminal=false
+Categories=HamRadio;Audio;Network;Utility;
+Keywords=ham;amateur;radio;ft8;ft4;wspr;wsjt;digital;
+StartupWMClass=digiham

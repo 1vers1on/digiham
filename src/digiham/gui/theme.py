@@ -12,8 +12,12 @@ change — anything it omits falls back to the default dark theme.
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
+
+logger = logging.getLogger(__name__)
 
 # The default dark theme's colour tokens. Also the fallback for any token a
 # theme leaves out, so this dict defines the full set of valid keys.
@@ -225,15 +229,60 @@ BUILTIN_THEMES: dict[str, dict[str, str]] = {
 # place (see _set_palette) — never rebound.
 PALETTE: dict[str, str] = dict(DEFAULT_COLORS)
 
+# Themes registered at runtime (typically by plugins via
+# ``ctx.register_theme``). Kept separate from BUILTIN_THEMES so a plugin
+# reload can drop them cleanly without disturbing the built-ins.
+REGISTERED_THEMES: dict[str, dict[str, str]] = {}
+
+# The tokens every theme understands — the keys of the default theme.
+THEME_TOKENS = tuple(DEFAULT_COLORS)
+
+
+def register_theme(name: str, colors: dict[str, str]) -> dict[str, str]:
+    """Add (or replace) a runtime theme, e.g. from a plugin.
+
+    ``colors`` maps colour tokens (see :data:`THEME_TOKENS`) to hex strings;
+    any token left out inherits the default dark theme, so a plugin only has
+    to spell out what it changes. Unknown tokens and invalid colours are
+    dropped with a warning rather than corrupting the stylesheet. Returns the
+    accepted token subset.
+    """
+    key = str(name).strip()
+    if not key:
+        raise ValueError("theme name must be a non-empty string")
+    clean: dict[str, str] = {}
+    for token, value in dict(colors).items():
+        if token not in DEFAULT_COLORS:
+            logger.warning("theme %r: ignoring unknown token %r", key, token)
+            continue
+        if not QColor(str(value)).isValid():
+            logger.warning("theme %r: ignoring invalid colour %r for %r",
+                           key, value, token)
+            continue
+        clean[token] = str(value)
+    REGISTERED_THEMES[key] = clean
+    logger.info("registered theme %r (%d tokens)", key, len(clean))
+    return clean
+
+
+def unregister_theme(name: str) -> None:
+    REGISTERED_THEMES.pop(str(name).strip(), None)
+
+
+def clear_registered_themes() -> None:
+    REGISTERED_THEMES.clear()
+
 
 def available_themes() -> dict[str, dict[str, str]]:
-    """All themes by name."""
-    return dict(BUILTIN_THEMES)
+    """All themes by name — built-ins plus any registered at runtime."""
+    themes = dict(BUILTIN_THEMES)
+    themes.update(REGISTERED_THEMES)
+    return themes
 
 
 def resolve_colors(theme: str | None) -> dict[str, str]:
     """Full token set for ``theme``, filling any gaps from the default theme."""
-    chosen = BUILTIN_THEMES.get(theme or DEFAULT_THEME, {})
+    chosen = available_themes().get(theme or DEFAULT_THEME, {})
     merged = dict(DEFAULT_COLORS)
     merged.update(chosen)
     return merged

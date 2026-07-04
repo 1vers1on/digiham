@@ -27,6 +27,7 @@ Design goals:
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import sys
 from pathlib import Path
@@ -37,12 +38,68 @@ logger = logging.getLogger(__name__)
 # A plugin hitting this many errors is disabled so it can't spam or misbehave.
 _MAX_ERRORS = 3
 
-# The hook names a plugin may implement. Kept explicit so the manager can
-# validate and so tooling/UI can introspect them.
+# The event hook names a plugin may implement. Kept explicit so the manager
+# can validate and so tooling/UI can introspect them. These are fire-and-
+# forget: their return value is ignored and a failure is isolated.
 HOOKS = (
     "on_load", "on_unload", "on_decode", "on_qso_logged",
-    "on_transmit", "on_band_change",
+    "on_transmit", "on_band_change", "on_config_changed", "on_rig_change",
 )
+
+
+class PluginStore:
+    """A tiny JSON-backed key/value store handed to each plugin so it can keep
+    settings and state across runs without hand-rolling file I/O.
+
+    Writes are persisted atomically on every ``set``. Values must be
+    JSON-serialisable. Reads never raise: a missing or corrupt file just
+    starts empty.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._data: dict[str, Any] = {}
+        if self.path.exists():
+            try:
+                self._data = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError, ValueError):
+                logger.warning("plugin store %s unreadable; starting empty",
+                               self.path)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._data[key] = value
+        self.save()
+
+    def setdefault(self, key: str, default: Any) -> Any:
+        if key not in self._data:
+            self.set(key, default)
+        return self._data[key]
+
+    def delete(self, key: str) -> None:
+        if self._data.pop(key, None) is not None:
+            self.save()
+
+    def as_dict(self) -> dict[str, Any]:
+        return dict(self._data)
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+        tmp.replace(self.path)
+
+    # dict-style sugar
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.set(key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
 
 
 class PluginContext:
@@ -55,6 +112,7 @@ class PluginContext:
     def __init__(self, engine: Any, data_root: Path) -> None:
         self._engine = engine
         self._data_root = Path(data_root)
+        self._themes: set[str] = set()   # theme names registered via this ctx
 
     @property
     def engine(self) -> Any:
@@ -82,6 +140,39 @@ class PluginContext:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def store(self, name: str) -> PluginStore:
+        """A JSON key/value :class:`PluginStore` in the plugin's data dir.
+
+        Most plugins get at this via ``self.store`` rather than calling here.
+        """
+        return PluginStore(self.data_dir(name) / "store.json")
+
+    def register_theme(self, name: str, colors: dict) -> dict:
+        """Add a colour theme to the app's theme picker.
+
+        ``colors`` maps colour tokens to hex strings (see the theme module's
+        ``THEME_TOKENS``); omitted tokens inherit the default dark theme.
+        The theme is removed automatically when the plugin is unloaded.
+        """
+        # Imported lazily so this module stays importable (and unit-testable)
+        # without the GUI/PySide stack present.
+        from .gui.theme import register_theme
+        resolved = register_theme(name, colors)
+        self._themes.add(str(name).strip())
+        return resolved
+
+    def _clear_registered_themes(self) -> None:
+        """Drop every theme registered through this context (on reload/exit)."""
+        if not self._themes:
+            return
+        try:
+            from .gui.theme import unregister_theme
+            for name in self._themes:
+                unregister_theme(name)
+        except Exception:
+            logger.exception("failed clearing registered themes")
+        self._themes.clear()
+
 
 class Plugin:
     """Base class for digiham plugins. Subclass it and override the hooks.
@@ -94,8 +185,10 @@ class Plugin:
     name: str = ""
     version: str = "0.1"
     description: str = ""
+    author: str = ""
 
     ctx: PluginContext = None  # type: ignore[assignment]
+    _store: PluginStore | None = None
 
     # -- lifecycle --------------------------------------------------------
     def on_load(self) -> None:
@@ -117,10 +210,32 @@ class Plugin:
     def on_band_change(self, band: str) -> None:
         """The operating band changed."""
 
+    def on_config_changed(self, config: Any) -> None:
+        """The user changed settings; *config* is the new Config."""
+
+    def on_rig_change(self, connected: bool, dial_hz: float, mode: str) -> None:
+        """The rig connected or disconnected."""
+
+    # -- contributions ----------------------------------------------------
+    def provide_themes(self) -> dict[str, dict[str, str]]:
+        """Return ``{name: {token: colour}}`` to add to the theme picker.
+
+        Called once after loading. Equivalent to calling
+        ``self.ctx.register_theme`` for each entry, but declarative.
+        """
+        return {}
+
     # -- convenience ------------------------------------------------------
     @property
     def display_name(self) -> str:
         return self.name or type(self).__name__
+
+    @property
+    def store(self) -> PluginStore:
+        """A lazily-created persistent key/value store for this plugin."""
+        if self._store is None:
+            self._store = self.ctx.store(self.display_name)
+        return self._store
 
 
 class LoadedPlugin:
@@ -131,6 +246,7 @@ class LoadedPlugin:
         self.source = source
         self.errors = 0
         self.disabled = False
+        self.themes: list[str] = []     # theme names this plugin contributed
 
     @property
     def name(self) -> str:
@@ -173,7 +289,23 @@ class PluginManager:
             self.plugins.append(LoadedPlugin(inst, source))
             logger.info("loaded plugin %s v%s (%s)", inst.display_name,
                         getattr(inst, "version", "?"), source.name)
+        self._register_plugin_themes()
         self.loaded = True
+
+    def _register_plugin_themes(self) -> None:
+        """Collect and register every loaded plugin's ``provide_themes``."""
+        for lp in self.plugins:
+            fn = getattr(lp.instance, "provide_themes", None)
+            if fn is None:
+                continue
+            try:
+                themes = fn() or {}
+                for name, colors in dict(themes).items():
+                    self.ctx.register_theme(name, colors)
+                    lp.themes.append(str(name).strip())
+            except Exception:
+                lp.errors += 1
+                logger.exception("plugin %s failed providing themes", lp.name)
 
     def _discover(self) -> list[tuple[type[Plugin], Path]]:
         found: list[tuple[type[Plugin], Path]] = []
@@ -240,6 +372,7 @@ class PluginManager:
                 lp.instance.on_unload()
             except Exception:
                 logger.exception("plugin %s failed in on_unload", lp.name)
+        self.ctx._clear_registered_themes()
         self.plugins.clear()
         self.loaded = False
 
@@ -253,7 +386,9 @@ class PluginManager:
             "name": lp.name,
             "version": getattr(lp.instance, "version", "?"),
             "description": getattr(lp.instance, "description", ""),
+            "author": getattr(lp.instance, "author", ""),
             "source": lp.source.name,
             "disabled": lp.disabled,
             "errors": lp.errors,
+            "themes": list(lp.themes),
         } for lp in self.plugins]

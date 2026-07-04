@@ -61,6 +61,8 @@ class Config:
     my_call: str = ""
     my_grid: str = ""
     tx_power_dbm: int = 37          # WSPR / logging power, dBm (37 dBm = 5 W)
+    tx_power_from_rig: bool = True  # log the rig's measured Tx power when it
+                                    # can be read; else fall back to tx_power_dbm
 
     # --- Operating -------------------------------------------------------
     mode: str = "FT8"              # FT8 | FT4 | WSPR
@@ -120,7 +122,10 @@ class Config:
     fd_section: str = ""           # ARRL/RAC section, e.g. WI, EMA, DX
     double_click_qsy: bool = True  # double-click a decode sets Rx freq
     cq_only: bool = False          # band-activity filter: show CQ calls only
+    cq73_only: bool = False        # band-activity filter: show CQ + 73/RR73 only
     hide_worked: bool = False      # band-activity filter: hide calls worked B4
+    snr_squelch: bool = False      # band-activity filter: visual squelch on SNR
+    snr_squelch_db: int = -24      # hide decodes weaker than this (dB)
 
     # --- Alerts ----------------------------------------------------------
     sound_alerts: bool = False     # beep on the events below

@@ -155,6 +155,7 @@ class RadioEngine(QObject):
         self._tx_idx = 0
         self._watchdog_deadline = 0.0
         self._qso_time_on: Optional[float] = None
+        self._last_power_w: Optional[float] = None    # rig's measured Tx power
 
         self._jobq: list[dict] = []
         self._dispatched: set[tuple] = set()
@@ -181,6 +182,7 @@ class RadioEngine(QObject):
         self.rig.connected.connect(self._on_rig_connected)
         self.rig.telemetry.connect(self._on_rig_telemetry)
         self.rig.meters.connect(self.rigMeters)
+        self.rig.meters.connect(self._capture_power)
         self.rig.failed.connect(self.statusMessage)
         self._txFinished.connect(self._on_tx_finished)
         self._tuneFinished.connect(self._on_tune_finished)
@@ -506,6 +508,17 @@ class RadioEngine(QObject):
         self.rigState.emit(ok, self.dial_hz, self.cfg.rig_mode)
         if ok:
             self.rig.set_freq(self.dial_hz)
+        else:
+            self._last_power_w = None      # don't log a stale measured power
+        self.plugins.dispatch("on_rig_change", ok, self.dial_hz,
+                              self.cfg.rig_mode)
+
+    def _capture_power(self, meters: dict) -> None:
+        """Remember the rig's most recent non-zero RF power reading (only
+        meaningful during Tx) so a logged QSO can record measured power."""
+        p = meters.get("power_w")
+        if p:
+            self._last_power_w = float(p)
 
     def _on_rig_telemetry(self, dial: float, mode: str, ptt: bool) -> None:
         if dial > 0 and abs(dial - self.dial_hz) > 1:
@@ -951,6 +964,14 @@ class RadioEngine(QObject):
     # logging
     # ------------------------------------------------------------------ #
 
+    def _logged_power_w(self) -> float:
+        """Tx power to record in the log, in watts. Prefer the rig's measured
+        RF power (captured during Tx); fall back to the configured
+        ``tx_power_dbm`` when the rig can't provide one."""
+        if self.cfg.tx_power_from_rig and self._last_power_w:
+            return round(self._last_power_w, 2)
+        return round(10 ** ((self.cfg.tx_power_dbm - 30) / 10), 2)
+
     def _commit_log(self, dxcall: str, dxgrid: str,
                 report_sent: int, report_recv: Optional[int],
                 dxexch: str = "") -> None:
@@ -979,7 +1000,7 @@ class RadioEngine(QObject):
             rst_rcvd=seq.fmt_report(report_recv) if report_recv is not None else "",
             gridsquare=dxgrid, station_callsign=self.cfg.my_call,
             my_gridsquare=self.cfg.my_grid,
-            tx_pwr_w=round(10 ** ((self.cfg.tx_power_dbm - 30) / 10), 2),
+            tx_pwr_w=self._logged_power_w(),
             comment=comment, extra=extra)
         try:
             added = self.log.add(q)
@@ -1076,6 +1097,7 @@ class RadioEngine(QObject):
             self.plugins.load()
         elif not cfg.plugins_enabled and self.plugins.loaded:
             self.plugins.unload()
+        self.plugins.dispatch("on_config_changed", cfg)
         self._emit_tx_messages()
         self._report_status()
         self.freqChanged.emit(self.rx_freq, self.tx_freq)

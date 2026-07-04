@@ -9,13 +9,14 @@ from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QCheckBox, QFileDialog, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter,
+    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter,
     QVBoxLayout, QWidget,
 )
 
 from .. import bands
 from ..config import Config
 from ..engine import DecodeRow, RadioEngine, MODES
+from ..sequencer import K_73, K_RR73, K_RRR
 from .decode_table import DecodeTable
 from .log_window import LogWindow
 from .plugins_dialog import PluginsDialog
@@ -48,6 +49,7 @@ class MainWindow(QMainWindow):
         self._clock.start()
 
         self.engine.start()
+        self._activate_plugin_theme()
         self.statusBar().showMessage("ready")
         if not cfg.my_call:
             QTimer.singleShot(300, self._first_run_hint)
@@ -126,7 +128,19 @@ class MainWindow(QMainWindow):
         left.addLayout(self._build_progress())
 
         root.addLayout(left, 1)
-        root.addWidget(self._build_controls())
+
+        # Wrap the controls column in a scroll area so a short screen (or a
+        # multi-line QSO status) can never force the window taller than the
+        # display and push the waterfall / progress bar off the bottom.
+        controls = self._build_controls()
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidget(controls)
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        controls_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        controls_scroll.setFixedWidth(378)
+        root.addWidget(controls_scroll)
 
         self.band_table.activated.connect(self.engine.double_click_decode)
         self.rx_table.activated.connect(self.engine.double_click_decode)
@@ -412,6 +426,16 @@ class MainWindow(QMainWindow):
             t.setStyleSheet(f"color:{PALETTE['text_dim']};")
         self.waterfall.refresh_theme()
 
+    def _activate_plugin_theme(self) -> None:
+        """The configured theme may be supplied by a plugin, which only loads
+        once the engine starts — after main.py applied the built-in palette.
+        If ours is one of those, apply it now that it exists."""
+        from .theme import BUILTIN_THEMES, available_themes
+        if (self.cfg.theme not in BUILTIN_THEMES
+                and self.cfg.theme in available_themes()):
+            apply_theme(self._app(), self.cfg.font_size, self.cfg.theme)
+            self._apply_theme_colors()
+
     def _apply_visual_config(self) -> None:
         self.station_label.setText(
             f"{self.cfg.my_call or '(no call)'}   {self.cfg.my_grid}")
@@ -431,16 +455,30 @@ class MainWindow(QMainWindow):
 
     def _on_decodes(self, rows: list[DecodeRow]) -> None:
         for d in rows:
-            if self.cfg.cq_only and not d.is_cq and not d.to_me:
-                pass
-            elif self.cfg.hide_worked and d.worked_before and not d.to_me \
-                    and not d.new_dxcc:
-                pass
-            else:
+            if self._show_in_activity(d):
                 self.band_table.add_decode(d)
             if d.to_me or abs(d.freq_audio - self.engine.rx_freq) < 10 \
                     or (self.engine.seq.dxcall and d.de == self.engine.seq.dxcall):
                 self.rx_table.add_decode(d)
+
+    def _show_in_activity(self, d: DecodeRow) -> bool:
+        """Apply the Band Activity filters. Decodes addressed to me always show,
+        so a caller is never hidden."""
+        if d.to_me:
+            return True
+        if self.cfg.snr_squelch and d.snr < self.cfg.snr_squelch_db:
+            return False
+        if self.cfg.cq73_only and not (d.is_cq or self._is_signoff(d)):
+            return False
+        if self.cfg.cq_only and not d.is_cq:
+            return False
+        if self.cfg.hide_worked and d.worked_before and not d.new_dxcc:
+            return False
+        return True
+
+    @staticmethod
+    def _is_signoff(d: DecodeRow) -> bool:
+        return d.parsed.kind in (K_73, K_RR73, K_RRR)
 
     def _on_new_cycle(self, _cycle: int) -> None:
         self.band_table.mark_cycle()

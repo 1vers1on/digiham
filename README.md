@@ -1,8 +1,33 @@
-# digiham
+<p align="center">
+  <img src="assets/logo.svg" alt="digiham" width="128" height="128">
+</p>
+
+<h1 align="center">digiham</h1>
 
 A modern, dark-mode **FT8 / FT4 / WSPR operating frontend** for amateur
 radio — think WSJT-X, built on [`ft8lib`](https://pypi.org/project/ft8lib/),
 Hamlib's `rigctld`, and Qt 6 (PySide6).
+
+## Download & install
+
+Grab the latest build for your OS from the
+[**Releases**](https://github.com/1vers1on/digiham/releases) page — no Python,
+no `pip`, nothing else to install.
+
+| OS | File | How to install |
+|----|------|----------------|
+| **Windows** | `digiham-<version>-windows-setup.exe` | Run the installer, then launch **digiham** from the Start Menu. |
+| **macOS** (Apple silicon) | `digiham-<version>-macos-arm64.dmg` | Open the DMG and drag **digiham** into **Applications**. First launch: right-click the app → **Open** (it's unsigned, so double-clicking is blocked once by Gatekeeper). |
+| **Linux** (x86-64) | `digiham-<version>-x86_64.AppImage` | `chmod +x digiham-*.AppImage` then run it. Works on most modern distros; nothing to install. |
+| **Linux** (ARM64 / aarch64) | `digiham-<version>-aarch64.AppImage` | Same as above — for Raspberry Pi (64-bit) and other ARM boards/SBCs. |
+
+Every push also builds these as downloadable
+[workflow artifacts](https://github.com/1vers1on/digiham/actions) if you want a
+bleeding-edge build between releases.
+
+> **Linux note:** Qt 6 needs `libxcb-cursor0` present on the host
+> (`sudo apt install libxcb-cursor0` on Debian/Ubuntu). Everything else is
+> bundled inside the AppImage.
 
 ## Features
 
@@ -39,7 +64,7 @@ Hamlib's `rigctld`, and Qt 6 (PySide6).
   search window, behaviour toggles, and colours — all persisted to
   `~/.config/digiham/config.json`.
 
-## Running
+## Running from source (developers)
 
 ```bash
 # from a virtualenv that has ft8lib installed
@@ -49,6 +74,25 @@ digiham                    # launch the GUI
 
 On first launch, open **File → Settings (F2)** and set your callsign and
 grid before transmitting.
+
+### Building the packages locally
+
+The same one-folder build the CI uses:
+
+```bash
+pip install ".[packaging]"                     # adds PyInstaller
+pyinstaller packaging/digiham.spec --noconfirm # -> dist/digiham (dist/digiham.app on macOS)
+
+# then, per platform:
+bash packaging/linux/build-appimage.sh                       # -> dist/*.AppImage
+bash packaging/macos/build-dmg.sh                            # -> dist/*.dmg   (macOS)
+iscc /DMyAppVersion=0.1.0 packaging\windows\digiham.iss      # -> dist/*setup.exe (Windows, Inno Setup)
+```
+
+The app icon lives in [`assets/logo.svg`](assets/logo.svg); regenerate the
+`.png` / `.ico` / `.icns` derivatives with
+[`assets/generate-icons.sh`](assets/generate-icons.sh) (needs Inkscape +
+ImageMagick).
 
 ### Rig control
 
@@ -85,6 +129,3 @@ rig.RigController ◄───┤
 Each module is UI-free and independently testable; `gui/` is a thin layer
 of widgets over the engine's Qt-signal surface.
 
-## License
-
-MIT

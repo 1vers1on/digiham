@@ -1,0 +1,139 @@
+name: build
+
+# Build native, easy-to-install packages for all three desktop OSes on every
+# push. Tagging a release (v*) additionally publishes them to a GitHub Release.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # needed by the release job to upload assets
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04        # x86_64
+          - name: linux-arm64
+            os: ubuntu-22.04-arm    # aarch64 (native ARM runner)
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: macos-14            # Apple silicon (arm64)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Qt/xcb runtime libs so PySide6 loads while PyInstaller analyzes it.
+      - name: Install Linux system deps
+        if: startsWith(matrix.name, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libegl1 libgl1 libxkbcommon0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libportaudio2 libasound2
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          v=$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install project + build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install "pyinstaller>=6.11"
+
+      - name: Build frozen app (PyInstaller)
+        if: matrix.name != 'macos'   # macOS builds after generating its icns
+        run: pyinstaller packaging/digiham.spec --noconfirm
+
+      # --- Linux: AppImage --------------------------------------------------
+      - name: Package AppImage
+        if: startsWith(matrix.name, 'linux')
+        run: bash packaging/linux/build-appimage.sh
+
+      # --- macOS: rebuild a full multi-res icns, then DMG -------------------
+      - name: Build macOS icns
+        if: matrix.name == 'macos'
+        run: |
+          set -e
+          mkdir -p icon.iconset
+          cp assets/png/digiham-16.png   icon.iconset/icon_16x16.png
+          cp assets/png/digiham-32.png   icon.iconset/icon_16x16@2x.png
+          cp assets/png/digiham-32.png   icon.iconset/icon_32x32.png
+          cp assets/png/digiham-64.png   icon.iconset/icon_32x32@2x.png
+          cp assets/png/digiham-128.png  icon.iconset/icon_128x128.png
+          cp assets/png/digiham-256.png  icon.iconset/icon_128x128@2x.png
+          cp assets/png/digiham-256.png  icon.iconset/icon_256x256.png
+          cp assets/png/digiham-512.png  icon.iconset/icon_256x256@2x.png
+          cp assets/png/digiham-512.png  icon.iconset/icon_512x512.png
+          cp assets/png/digiham-1024.png icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o assets/digiham.icns
+
+      - name: Build frozen app (macOS)
+        if: matrix.name == 'macos'
+        run: pyinstaller packaging/digiham.spec --noconfirm
+
+      - name: Package DMG
+        if: matrix.name == 'macos'
+        run: bash packaging/macos/build-dmg.sh
+
+      # --- Windows: Inno Setup installer -----------------------------------
+      - name: Install Inno Setup
+        if: matrix.name == 'windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: Package Windows installer
+        if: matrix.name == 'windows'
+        shell: cmd
+        run: iscc /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\windows\digiham.iss
+
+      # --- Collect the distributables --------------------------------------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: digiham-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            dist/*.AppImage
+            dist/*.dmg
+            dist/*setup.exe
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

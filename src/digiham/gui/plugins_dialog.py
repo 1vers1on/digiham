@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-_COLS = ["Plugin", "Version", "Description", "File", "Status"]
+_COLS = ["Plugin", "Version", "Author", "Description", "File", "Status"]
 
 
 class PluginsDialog(QDialog):
@@ -56,17 +56,24 @@ class PluginsDialog(QDialog):
         mgr = self.engine.plugins
         rows = mgr.describe()
         self.table.setRowCount(0)
+        themed = []
         for p in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
             status = "disabled" if p["disabled"] else "active"
             if p["errors"]:
                 status += f" ({p['errors']} error{'s' if p['errors'] != 1 else ''})"
-            cells = [p["name"], p["version"], p["description"], p["source"], status]
+            if p.get("themes"):
+                status += "  ·  +theme"
+                themed.extend(p["themes"])
+            cells = [p["name"], p["version"], p.get("author", ""),
+                     p["description"], p["source"], status]
             for c, text in enumerate(cells):
                 self.table.setItem(r, c, QTableWidgetItem(str(text)))
         n = len(rows)
         msg = f"{n} plugin{'s' if n != 1 else ''} loaded."
+        if themed:
+            msg += f"  Themes added: {', '.join(sorted(themed))}."
         if mgr.load_errors:
             msg += "  Load errors:\n" + "\n".join(
                 f"  • {src}: {err}" for src, err in mgr.load_errors)

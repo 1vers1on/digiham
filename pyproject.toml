@@ -21,6 +21,11 @@ dependencies = [
     "pyserial",
 ]
 
+[project.optional-dependencies]
+packaging = [
+    "pyinstaller>=6.11",
+]
+
 [project.scripts]
 digiham = "digiham.main:main"
 digiham-gui = "digiham.main:main"

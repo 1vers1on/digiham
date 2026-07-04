@@ -33,6 +33,7 @@ class DecodeTable(QTableWidget):
         for i, wdt in enumerate((60, 42, 48, 56, 46, 96)):
             self.setColumnWidth(i, wdt)
         self.itemDoubleClicked.connect(self._on_double)
+        self._decodes_since_mark = False
 
     def _on_double(self, item: QTableWidgetItem) -> None:
         row = item.row()
@@ -84,6 +85,7 @@ class DecodeTable(QTableWidget):
             self.item(row, 4).setToolTip(f"{d.bearing_deg:.0f}° from you")
         self.item(row, 0).setData(Qt.ItemDataRole.UserRole, d)
 
+        self._decodes_since_mark = True
         if self.rowCount() > _MAX_ROWS:
             self.removeRow(0)
         self.scrollToBottom()
@@ -101,9 +103,12 @@ class DecodeTable(QTableWidget):
         return None, None, False
 
     def mark_cycle(self) -> None:
-        """Insert a faint separator row at a period boundary."""
-        if self.rowCount() == 0:
+        """Insert a faint separator row at a period boundary, but only when the
+        cycle just ended actually produced decodes — otherwise idle periods
+        would stack up empty separator lines."""
+        if self.rowCount() == 0 or not self._decodes_since_mark:
             return
+        self._decodes_since_mark = False
         row = self.rowCount()
         self.insertRow(row)
         it = QTableWidgetItem("")

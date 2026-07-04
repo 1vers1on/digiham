@@ -48,17 +48,54 @@ class MyPlugin(Plugin):
 
     def on_band_change(self, band):
         ...
+
+    def on_config_changed(self, config):
+        # the user changed Settings; config is the new Config
+        ...
+
+    def on_rig_change(self, connected, dial_hz, mode):
+        # the rig connected or disconnected
+        ...
 ```
 
 ### The context (`self.ctx`)
 
-| Attribute            | What it gives you                                  |
-|----------------------|----------------------------------------------------|
-| `ctx.config`         | the live `Config` (read your settings)             |
-| `ctx.log`            | the `QsoLog` (`.records`, `.worked_calls()`, …)     |
-| `ctx.status(msg)`    | show a message in the status bar                   |
-| `ctx.data_dir(name)` | a private folder for your plugin to write files    |
-| `ctx.engine`         | the full engine, for advanced use                  |
+| Attribute                     | What it gives you                             |
+|-------------------------------|-----------------------------------------------|
+| `ctx.config`                  | the live `Config` (read your settings)        |
+| `ctx.log`                     | the `QsoLog` (`.records`, `.worked_calls()`)  |
+| `ctx.status(msg)`             | show a message in the status bar              |
+| `ctx.data_dir(name)`          | a private folder to write files in            |
+| `ctx.store(name)`             | a JSON key/value `PluginStore` (see below)    |
+| `ctx.register_theme(name, …)` | add a colour theme to the picker              |
+| `ctx.engine`                  | the full engine, for advanced use             |
+
+### Persisting settings and state (`self.store`)
+
+Every plugin gets a private JSON key/value store that survives restarts —
+no file handling required. It saves atomically on each write:
+
+```python
+def on_load(self):
+    self.count = self.store.get("count", 0)
+
+def on_qso_logged(self, qso):
+    self.count += 1
+    self.store["count"] = self.count      # persisted immediately
+```
+
+### Contributing themes
+
+Return themes from `provide_themes` (they show up in
+Settings → Colours → Theme and are removed on reload):
+
+```python
+def provide_themes(self):
+    return {"My Theme": {"bg": "#101418", "accent": "#ff8c42", ...}}
+```
+
+A theme only names the tokens it changes; the rest inherit the default dark
+theme. See `solar_theme.py` for a full example and the token list.
 
 ## Safety
 
