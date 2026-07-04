@@ -30,8 +30,9 @@ from . import serialports
 from . import adif
 from .adif import Qso, QsoLog
 from .audio import Capture, TxPlayer
-from .config import Config
+from .config import Config, config_dir
 from .decoder import DecodeController
+from .plugins import PluginContext, PluginManager
 from .rig import RigConnect, RigController
 from .spotlog import SpotLog
 from .wsjtx import WsjtxReporter
@@ -143,6 +144,11 @@ class RadioEngine(QObject):
         self.rig = RigController(self)
         self.reporter = WsjtxReporter(cfg, self)
 
+        self.plugins = PluginManager(
+            PluginContext(self, config_dir() / "plugin_data"),
+            dirs=[cfg.resolved_plugins_dir()],
+            disabled=cfg.disabled_plugins)
+
         self._txing = False
         self._tuning = False
         self._tx_cycle = -1
@@ -178,6 +184,8 @@ class RadioEngine(QObject):
         self.rig.failed.connect(self.statusMessage)
         self._txFinished.connect(self._on_tx_finished)
         self._tuneFinished.connect(self._on_tune_finished)
+        # feed band changes to plugins from the one signal every path emits
+        self.bandChanged.connect(lambda b: self.plugins.dispatch("on_band_change", b))
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(50)
@@ -207,6 +215,11 @@ class RadioEngine(QObject):
 
     def start(self) -> None:
         logger.info("engine starting in %s on %s", self.mode, self.band)
+        if self.cfg.plugins_enabled:
+            self.plugins.load()
+            if self.plugins.plugins:
+                self.statusMessage.emit(
+                    f"loaded {len(self.plugins.plugins)} plugin(s)")
         self._start_capture()
         if self.cfg.rig_enabled:
             self.connect_rig()
@@ -233,6 +246,7 @@ class RadioEngine(QObject):
         self.rig.shutdown()
         self.decoder.shutdown()
         self.reporter.stop()
+        self.plugins.unload()
 
     def _start_capture(self) -> None:
         try:
@@ -662,6 +676,7 @@ class RadioEngine(QObject):
                 self._log_spot(row)
                 self._maybe_alert(row)
                 self._auto_sequence(row)
+                self.plugins.dispatch("on_decode", row)
         self._pump_jobs()
 
     def _make_row(self, r, cycle: int, cstart: float, worked: set,
@@ -801,6 +816,7 @@ class RadioEngine(QObject):
         self.txStateChanged.emit(True, msg)
         self._report_status()
         self.statusMessage.emit(f"Tx: {msg}")
+        self.plugins.dispatch("on_transmit", msg, self.mode, self.band)
         self.spots.log_tx(dt.datetime.now(dt.timezone.utc), self.dial_hz / 1e6,
                           self.mode, self.tx_freq, msg)
         try:
@@ -975,6 +991,7 @@ class RadioEngine(QObject):
             self._write_daily_adif(q)
             self.qsoLogged.emit(q)
             self.reporter.report_qso(q)
+            self.plugins.dispatch("on_qso_logged", q)
             self.statusMessage.emit(f"logged {dxcall}")
         self._qso_time_on = None
 
@@ -1053,6 +1070,12 @@ class RadioEngine(QObject):
         self.spots.path = cfg.resolved_all_txt()
         self.spots.enabled = cfg.all_txt
         self.reporter.apply_config(cfg)
+        self.plugins.dirs = [cfg.resolved_plugins_dir()]
+        self.plugins.disabled = {d.upper() for d in cfg.disabled_plugins}
+        if cfg.plugins_enabled and not self.plugins.loaded:
+            self.plugins.load()
+        elif not cfg.plugins_enabled and self.plugins.loaded:
+            self.plugins.unload()
         self._emit_tx_messages()
         self._report_status()
         self.freqChanged.emit(self.rx_freq, self.tx_freq)

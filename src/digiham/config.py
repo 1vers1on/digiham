@@ -151,6 +151,11 @@ class Config:
     adif_daily_files: bool = False  # also write a dated ADIF per operating day
     adif_daily_dir: str = ""      # "" -> config_dir(); folder for the dated files
 
+    # --- Plugins ---------------------------------------------------------
+    plugins_enabled: bool = True
+    plugins_dir: str = ""         # "" -> config_dir()/plugins
+    disabled_plugins: list = field(default_factory=list)  # plugin names to skip
+
     # Free-form extras that we do not model explicitly.
     extra: dict = field(default_factory=dict)
 
@@ -163,6 +168,10 @@ class Config:
 
     def resolved_daily_dir(self) -> Path:
         return Path(self.adif_daily_dir) if self.adif_daily_dir else config_dir()
+
+    def resolved_plugins_dir(self) -> Path:
+        return Path(self.plugins_dir) if self.plugins_dir \
+            else config_dir() / "plugins"
 
     def fd_exchange(self) -> str:
         """Field Day exchange ``"<class> <section>"`` (empty if incomplete)."""

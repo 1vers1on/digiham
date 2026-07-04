@@ -18,6 +18,7 @@ from ..config import Config
 from ..engine import DecodeRow, RadioEngine, MODES
 from .decode_table import DecodeTable
 from .log_window import LogWindow
+from .plugins_dialog import PluginsDialog
 from .settings_dialog import SettingsDialog
 from .theme import PALETTE, apply_theme
 from .waterfall import Waterfall
@@ -30,6 +31,7 @@ class MainWindow(QMainWindow):
         self.engine = RadioEngine(cfg)
         self._updating = False
         self._log_window: LogWindow | None = None
+        self._plugins_window: PluginsDialog | None = None
 
         self.setWindowTitle("digiham")
         self.resize(1180, 780)
@@ -84,6 +86,11 @@ class MainWindow(QMainWindow):
             a.triggered.connect(lambda _c, mo=mode: self._set_mode(mo))
             m_mode.addAction(a)
         self._mode_actions = {a.text(): a for a in m_mode.actions()}
+
+        m_tools = mb.addMenu("&Tools")
+        act_plugins = QAction("Plugins…", self)
+        act_plugins.triggered.connect(self._show_plugins)
+        m_tools.addAction(act_plugins)
 
         m_help = mb.addMenu("&Help")
         act_about = QAction("About", self)
@@ -684,6 +691,14 @@ class MainWindow(QMainWindow):
             self._log_window.refresh()
         self.statusBar().showMessage(result.summary(), 8000)
         QMessageBox.information(self, "Import complete", result.summary().capitalize())
+
+    def _show_plugins(self) -> None:
+        if self._plugins_window is None:
+            self._plugins_window = PluginsDialog(
+                self.engine, self.cfg.resolved_plugins_dir(), self)
+        self._plugins_window.refresh()
+        self._plugins_window.show()
+        self._plugins_window.raise_()
 
     def _show_log(self) -> None:
         if self._log_window is None:
