@@ -36,12 +36,20 @@ class _ModeSpec:
     tx_offset: float
     nmax: int
     tx_start_sample: int
-    early: Optional[float]      # seconds into cycle for the early decode
 
 MODES = {
-    "FT8": _ModeSpec(15.0, 0.5, ft8lib.FT8.NMAX, 6000, 13.6),
-    "FT4": _ModeSpec(7.5, 0.5, ft8lib.FT4.NMAX, 6000, 5.7),
-    "WSPR": _ModeSpec(120.0, 1.0, ft8lib.WSPR.NMAX, 12000, None),
+    "FT8": _ModeSpec(15.0, 0.5, ft8lib.FT8.NMAX, 6000),
+    "FT4": _ModeSpec(7.5, 0.5, ft8lib.FT4.NMAX, 6000),
+    "WSPR": _ModeSpec(120.0, 1.0, ft8lib.WSPR.NMAX, 12000),
+}
+
+# Streaming decode-attempt schedule, seconds into the cycle: the WSJT-X
+# passes that ft8lib.RealtimeDecoder runs. FT8/FT4 audio is fed to the
+# decoder as it arrives and decoded at these points, so messages appear
+# before the cycle ends; the last attempt sees the complete transmission.
+_RT_ATTEMPTS = {
+    "FT8": (11.8, 13.5, 14.7),
+    "FT4": (5.6, 6.048),
 }
 
 
@@ -124,6 +132,11 @@ class RadioEngine(QObject):
 
         self._jobq: list[dict] = []
         self._dispatched: set[tuple] = set()
+        # FT8/FT4 streaming-decode state: which cycle we're feeding, how many
+        # 12 kHz samples of it have been fed, and the next attempt time due.
+        self._rt_cycle = -1
+        self._rt_fed = 0
+        self._rt_next = 0
         self._seen: dict[int, set] = {}
         self._cur_cycle = -1
         self._rig_poll_t = 0.0
@@ -219,6 +232,7 @@ class RadioEngine(QObject):
         self.cfg.mode = mode
         self.set_band(self.band, force=True)
         self._dispatched.clear()
+        self._rt_cycle = -1          # realign the streaming decoder
         self.seq.start_cq()
         self._emit_tx_messages()
         self.statusMessage.emit(f"mode {mode}")
@@ -419,14 +433,55 @@ class RadioEngine(QObject):
         self._seen = {c: v for c, v in self._seen.items() if c >= cycle - 4}
 
     def _schedule_decodes(self, cycle: int, cstart: float, t: float) -> None:
-        spec = self.spec
-        # early decode of the current cycle (auto-seq needs it before Tx)
-        if spec.early is not None and t >= spec.early:
-            self._queue_decode(cycle, cstart, spec.early, "early")
-        # authoritative full decode of the previous cycle, once it's complete
-        if t >= 0.15:
-            self._queue_decode(cycle - 1, (cycle - 1) * self.period,
-                               self.period, "full")
+        if self.mode == "WSPR":
+            # WSPR has no streaming decoder: decode the previous 2-minute
+            # period in full once it has completed.
+            if t >= 0.15:
+                self._queue_decode(cycle - 1, (cycle - 1) * self.period,
+                                   self.period, "full")
+            return
+        self._stream_decodes(cycle, cstart, t)
+
+    def _stream_decodes(self, cycle: int, cstart: float, t: float) -> None:
+        """Feed the current cycle's audio to the realtime decoder at the
+        WSJT-X attempt times, so FT8/FT4 messages decode part-way through the
+        period instead of only at the end.
+
+        Each attempt reads the cycle's audio so far and hands the decoder the
+        slice added since the previous attempt (from the cycle boundary on a
+        fresh cycle). If a decode is still running the attempt is retried on a
+        later tick; the block then simply spans more of the cycle, which the
+        decoder tolerates. Decoded messages are deduplicated per cycle in
+        :meth:`_on_decoded`.
+        """
+        if self.capture is None or self.decoder.busy:
+            return
+        if cycle != self._rt_cycle:
+            self._rt_cycle = cycle
+            self._rt_fed = 0
+            self._rt_next = 0
+        attempts = _RT_ATTEMPTS[self.mode]
+        if self._rt_next >= len(attempts) or t < attempts[self._rt_next]:
+            return
+        avail = self.capture.read_period(cstart, min(t, self.period))
+        if avail is None or len(avail) <= self._rt_fed:
+            return
+        fmin, fmax = self._decode_window()
+        job = {
+            "audio": avail[self._rt_fed:], "mode": self.mode, "band": self.band,
+            "cycle": cycle, "cstart": cstart, "tag": "rt",
+            "new_cycle": self._rt_fed == 0,
+            "freq_min": fmin, "freq_max": fmax,
+            "depth": self.cfg.decode_depth,
+            "mycall": self.cfg.my_call,
+            "dxcall": self.seq.dxcall if self.cfg.decode_dxcall_ap else "",
+        }
+        if self.decoder.submit(job):
+            self._rt_fed = len(avail)
+            # advance past every attempt time this block already covered
+            while (self._rt_next < len(attempts)
+                   and t >= attempts[self._rt_next]):
+                self._rt_next += 1
 
     def _queue_decode(self, cycle: int, cstart: float, length: float, tag: str) -> None:
         key = (cycle, tag)

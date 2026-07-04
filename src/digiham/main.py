@@ -18,7 +18,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("digiham")
     app.setOrganizationName("digiham")
-    apply_theme(app, cfg.font_size)
+    apply_theme(app, cfg.font_size, cfg.theme)
 
     # let Ctrl-C in a terminal close the app cleanly
     signal.signal(signal.SIGINT, signal.SIG_DFL)

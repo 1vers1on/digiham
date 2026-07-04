@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 from ..config import Config
 from ..rigctl import normalize_mode
 from .. import audio
+from .waterfall import COLORMAP_NAMES
+from .theme import available_themes, DEFAULT_THEME
 
 
 class SettingsDialog(QDialog):
@@ -160,7 +162,12 @@ class SettingsDialog(QDialog):
     def _colour_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
-        self.cb_wf = QComboBox(); self.cb_wf.addItems(["blue", "afmhot", "grey"])
+        self.cb_theme = QComboBox()
+        theme_names = list(available_themes())
+        self.cb_theme.addItems(theme_names)
+        self.cb_theme.setCurrentText(
+            self.cfg.theme if self.cfg.theme in theme_names else DEFAULT_THEME)
+        self.cb_wf = QComboBox(); self.cb_wf.addItems(COLORMAP_NAMES)
         self.cb_wf.setCurrentText(self.cfg.waterfall_palette)
         self.s_wfg = QDoubleSpinBox(); self.s_wfg.setRange(0.2, 5.0)
         self.s_wfg.setSingleStep(0.1); self.s_wfg.setValue(self.cfg.waterfall_gain)
@@ -168,6 +175,7 @@ class SettingsDialog(QDialog):
         self.s_wfz.setValue(self.cfg.waterfall_zero)
         self.s_font = QSpinBox(); self.s_font.setRange(8, 18)
         self.s_font.setValue(self.cfg.font_size)
+        f.addRow("Theme", self.cb_theme)
         f.addRow("Waterfall palette", self.cb_wf)
         f.addRow("Waterfall gain", self.s_wfg)
         f.addRow("Waterfall zero (dB)", self.s_wfz)
@@ -207,6 +215,7 @@ class SettingsDialog(QDialog):
         c.double_click_qsy = self.c_dcqsy.isChecked()
         c.cq_only = self.c_cqonly.isChecked()
         c.tx_watchdog_min = self.s_wd.value()
+        c.theme = self.cb_theme.currentText()
         c.waterfall_palette = self.cb_wf.currentText()
         c.waterfall_gain = self.s_wfg.value()
         c.waterfall_zero = self.s_wfz.value()

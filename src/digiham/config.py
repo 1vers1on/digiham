@@ -83,6 +83,7 @@ class Config:
     pskreporter: bool = False
 
     # --- UI --------------------------------------------------------------
+    theme: str = "Default Dark"    # key into gui.theme.available_themes()
     waterfall_palette: str = "blue"
     waterfall_gain: float = 1.0
     waterfall_zero: float = 0.0

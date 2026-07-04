@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.rx_table.activated.connect(self.engine.double_click_decode)
         self.waterfall.rxClicked.connect(self.engine.set_rx_freq)
         self.waterfall.txClicked.connect(self.engine.set_tx_freq)
+        self.waterfall.paletteChanged.connect(self._on_waterfall_palette)
 
     def _titled(self, title: str) -> QGroupBox:
         box = QGroupBox(title)
@@ -280,11 +281,13 @@ class MainWindow(QMainWindow):
         rm = QGroupBox("Rig")
         g = QGridLayout(rm)
         self.meter_labels: dict[str, QLabel] = {}
+        self.meter_titles: list[QLabel] = []
         for col, (key, title) in enumerate(
                 [("strength", "S-meter"), ("power_w", "Pwr"), ("swr", "SWR"),
                  ("alc", "ALC"), ("vd", "Vd")]):
             t = QLabel(title)
             t.setStyleSheet(f"color:{PALETTE['text_dim']};")
+            self.meter_titles.append(t)
             v = QLabel("—")
             v.setStyleSheet("font-weight:600;")
             g.addWidget(t, 0, col, Qt.AlignmentFlag.AlignHCenter)
@@ -358,13 +361,30 @@ class MainWindow(QMainWindow):
         e.bandChanged.connect(self._on_band_followed)
         e.qsoLogged.connect(self._on_qso_logged)
 
+    def _apply_theme_colors(self) -> None:
+        """Re-apply colours to the few widgets styled once at construction so a
+        live theme switch reaches them too (chrome/tables/waterfall repaint on
+        their own from the shared PALETTE)."""
+        self.station_label.setStyleSheet(
+            f"color:{PALETTE['green']}; font-weight:600;")
+        self.qso_status.setStyleSheet(f"color:{PALETTE['text_dim']};")
+        self.decode_dot.setStyleSheet(f"color: {PALETTE['text_dim']};")
+        for t in self.meter_titles:
+            t.setStyleSheet(f"color:{PALETTE['text_dim']};")
+        self.waterfall.refresh_theme()
+
     def _apply_visual_config(self) -> None:
         self.station_label.setText(
             f"{self.cfg.my_call or '(no call)'}   {self.cfg.my_grid}")
         self.waterfall.set_palette(self.cfg.waterfall_palette,
                                    self.cfg.waterfall_gain, self.cfg.waterfall_zero)
+        self.waterfall.set_mode(self.engine.mode)
         self.waterfall.set_markers(self.engine.rx_freq, self.engine.tx_freq)
         self._on_dial(self.engine.dial_hz)
+
+    def _on_waterfall_palette(self, name: str, gain: float) -> None:
+        self.cfg.waterfall_palette = name
+        self.cfg.waterfall_gain = gain
 
     # ------------------------------------------------------------------ #
     # slots: decodes / activity
@@ -505,6 +525,7 @@ class MainWindow(QMainWindow):
 
     def _set_mode(self, mode: str) -> None:
         self.engine.set_mode(mode)
+        self.waterfall.set_mode(mode)
         self._updating = True
         self.mode_combo.setCurrentText(mode)
         for name, act in self._mode_actions.items():
@@ -569,6 +590,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             new = dlg.result_config()
             font_changed = new.font_size != self.cfg.font_size
+            theme_changed = new.theme != self.cfg.theme
             audio_changed = (new.audio_in != self.cfg.audio_in
                              or new.audio_out != self.cfg.audio_out
                              or new.audio_in_gain != self.cfg.audio_in_gain)
@@ -580,8 +602,9 @@ class MainWindow(QMainWindow):
             self.callfirst_chk.setChecked(new.call_first)
             if audio_changed:
                 self.engine.restart_audio()
-            if font_changed:
-                apply_theme(self.window().parent() or self._app(), new.font_size)
+            if font_changed or theme_changed:
+                apply_theme(self._app(), new.font_size, new.theme)
+                self._apply_theme_colors()
             self.statusBar().showMessage("settings saved", 4000)
 
     @staticmethod
