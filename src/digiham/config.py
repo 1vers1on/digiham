@@ -100,11 +100,18 @@ class Config:
     auto_log: bool = True          # log automatically on RR73/73
     tx_watchdog_min: int = 6       # halt Tx after N minutes of no reply (0 = off)
     double_click_qsy: bool = True  # double-click a decode sets Rx freq
-    cq_only: bool = False          # band-activity filter
-    alert_new_dxcc: bool = True
+    cq_only: bool = False          # band-activity filter: show CQ calls only
+    hide_worked: bool = False      # band-activity filter: hide calls worked B4
+
+    # --- Alerts ----------------------------------------------------------
+    sound_alerts: bool = False     # beep on the events below
+    alert_new_dxcc: bool = True    # flag/alert stations from an unworked DXCC
+    alert_new_grid: bool = False   # flag/alert stations from an unworked grid
 
     # --- Reporting -------------------------------------------------------
     pskreporter: bool = False
+    all_txt: bool = True           # append decodes/Tx to an ALL.TXT spot log
+    all_txt_file: str = ""         # "" -> config_dir()/ALL.TXT
 
     # --- WSJT-X UDP output (GridTracker, JTAlert, …) ---------------------
     udp_enabled: bool = False
@@ -128,6 +135,10 @@ class Config:
 
     def resolved_log_file(self) -> Path:
         return Path(self.log_file) if self.log_file else log_path()
+
+    def resolved_all_txt(self) -> Path:
+        return Path(self.all_txt_file) if self.all_txt_file \
+            else config_dir() / "ALL.TXT"
 
     def save(self, path: Path | None = None) -> None:
         path = path or config_path()

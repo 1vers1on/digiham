@@ -44,12 +44,18 @@ class LogWindow(QDialog):
         self.table.setRowCount(0)
         for q in reversed(self.log.records):
             self._add(q)
-        self.count.setText(f"{len(self.log.records)} QSOs")
+        self._update_count()
 
     def add_qso(self, q: Qso) -> None:
         self.table.insertRow(0)
         self._fill(0, q)
-        self.count.setText(f"{len(self.log.records)} QSOs")
+        self._update_count()
+
+    def _update_count(self) -> None:
+        s = self.log.stats()
+        self.count.setText(
+            f"{s['qsos']} QSOs · {s['calls']} calls · {s['dxcc']} DXCC · "
+            f"{s['grids']} grids · {s['bands']} bands")
 
     def _add(self, q: Qso) -> None:
         row = self.table.rowCount()

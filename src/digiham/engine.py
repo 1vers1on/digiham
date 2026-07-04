@@ -10,6 +10,7 @@ driven headless or tested on its own.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,13 +20,17 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 import ft8lib
 
+logger = logging.getLogger(__name__)
+
 from . import bands
+from . import dxcc
 from . import geo
 from .adif import Qso, QsoLog
 from .audio import Capture, TxPlayer
 from .config import Config
 from .decoder import DecodeController
 from .rig import RigController
+from .spotlog import SpotLog
 from .wsjtx import WsjtxReporter
 from . import sequencer as seq
 
@@ -74,6 +79,10 @@ class DecodeRow:
     grid: str = ""
     worked_before: bool = False
     new_call: bool = False
+    country: str = ""
+    continent: str = ""
+    new_dxcc: bool = False
+    new_grid: bool = False
     distance_km: Optional[float] = None
     bearing_deg: Optional[float] = None
     parsed: seq.ParsedMessage = field(default_factory=lambda: seq.ParsedMessage(""))
@@ -106,6 +115,7 @@ class RadioEngine(QObject):
     qsoLogged = Signal(object)            # Qso
 
     _txFinished = Signal(int)
+    _tuneFinished = Signal()
 
     def __init__(self, cfg: Config, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -118,6 +128,7 @@ class RadioEngine(QObject):
         self.tx_enabled = False
 
         self.log = QsoLog(cfg.resolved_log_file())
+        self.spots = SpotLog(cfg.resolved_all_txt(), cfg.all_txt)
         self.seq = seq.Sequencer(cfg.my_call, cfg.my_grid)
 
         self.capture: Optional[Capture] = None
@@ -127,6 +138,7 @@ class RadioEngine(QObject):
         self.reporter = WsjtxReporter(cfg, self)
 
         self._txing = False
+        self._tuning = False
         self._tx_cycle = -1
         self._tx_idx = 0
         self._watchdog_deadline = 0.0
@@ -156,6 +168,7 @@ class RadioEngine(QObject):
         self.rig.meters.connect(self.rigMeters)
         self.rig.failed.connect(self.statusMessage)
         self._txFinished.connect(self._on_tx_finished)
+        self._tuneFinished.connect(self._on_tune_finished)
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(50)
@@ -184,6 +197,7 @@ class RadioEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
+        logger.info("engine starting in %s on %s", self.mode, self.band)
         self._start_capture()
         if self.cfg.rig_enabled:
             self.connect_rig()
@@ -197,8 +211,11 @@ class RadioEngine(QObject):
         self.dialChanged.emit(self.dial_hz)
 
     def stop(self) -> None:
+        logger.info("engine stopping")
         self._tick_timer.stop()
         self._spec_timer.stop()
+        if self._tuning:
+            self.set_tune(False)
         if self._txing:
             self._end_tx()
         if self.capture:
@@ -215,9 +232,11 @@ class RadioEngine(QObject):
                 seconds=max(135.0, self.period + 15.0),
                 on_status=self.statusMessage.emit)
             self.capture.start(time.time())
+            logger.info("rx capture started at %s Hz", self.capture.fs)
             self.statusMessage.emit(f"Rx audio {self.capture.fs} Hz")
         except Exception as e:
             self.capture = None
+            logger.exception("audio input unavailable")
             self.statusMessage.emit(f"audio input unavailable: {e}")
 
     def restart_audio(self) -> None:
@@ -233,9 +252,19 @@ class RadioEngine(QObject):
     def set_mode(self, mode: str) -> None:
         if mode not in MODES or mode == self.mode:
             return
+        logger.info("mode change %s -> %s", self.mode, mode)
         self.halt_tx()
         self.mode = mode
         self.cfg.mode = mode
+        # If the current band has no standard dial for the new mode (e.g. FT4
+        # on 160m), move to the first band that does rather than leaving the
+        # dial stranded on the old mode's frequency.
+        if bands.dial_for(self.band, mode) is None:
+            fallback = bands.first_band_for(mode)
+            if fallback:
+                self.band = fallback
+                self.cfg.band = fallback
+                self.bandChanged.emit(fallback)
         self.set_band(self.band, force=True)
         self._dispatched.clear()
         self._rt_cycle = -1          # realign the streaming decoder
@@ -248,6 +277,7 @@ class RadioEngine(QObject):
             return
         if band == self.band and not force:
             return
+        logger.info("band change %s -> %s", self.band, band)
         self.band = band
         self.cfg.band = band
         dial = bands.dial_for(band, self.mode)
@@ -279,7 +309,10 @@ class RadioEngine(QObject):
         self.freqChanged.emit(self.rx_freq, self.tx_freq)
 
     def enable_tx(self, on: bool) -> None:
+        if on and self._tuning:
+            self.set_tune(False)
         self.tx_enabled = on
+        logger.info("tx %s", "enabled" if on else "disabled")
         if on:
             self._watchdog_deadline = time.time() + self.cfg.tx_watchdog_min * 60
         self.txEnableChanged.emit(on)
@@ -288,6 +321,8 @@ class RadioEngine(QObject):
 
     def halt_tx(self) -> None:
         self.tx_enabled = False
+        if self._tuning:
+            self.set_tune(False)
         if self._txing:
             self._end_tx()
         self.txEnableChanged.emit(False)
@@ -312,6 +347,7 @@ class RadioEngine(QObject):
 
     def set_monitor(self, on: bool) -> None:
         self.monitoring = on
+        logger.info("monitoring %s", "enabled" if on else "disabled")
         if on and self.capture is None:
             self._start_capture()
         elif not on and self.capture is not None:
@@ -374,14 +410,17 @@ class RadioEngine(QObject):
     def connect_rig(self) -> None:
         self._rig_want = True
         self._rig_retry_t = time.time()
+        logger.info("connecting rig at %s:%s", self.cfg.rig_host, self.cfg.rig_port)
         self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
                              self.cfg.rig_split, self.cfg.rig_mode)
 
     def disconnect_rig(self) -> None:
         self._rig_want = False
+        logger.info("disconnecting rig")
         self.rig.disconnect_rig()
 
     def _on_rig_connected(self, ok: bool, msg: str) -> None:
+        logger.info("rig connection %s: %s", "ok" if ok else "failed", msg)
         self.statusMessage.emit(f"rig: {msg}")
         self.rigState.emit(ok, self.dial_hz, self.cfg.rig_mode)
         if ok:
@@ -389,6 +428,7 @@ class RadioEngine(QObject):
 
     def _on_rig_telemetry(self, dial: float, mode: str, ptt: bool) -> None:
         if dial > 0 and abs(dial - self.dial_hz) > 1:
+            logger.debug("rig dial updated to %s Hz", dial)
             self.dial_hz = dial
             self.dialChanged.emit(dial)
             # follow the rig: turning the knob onto another band switches
@@ -429,6 +469,7 @@ class RadioEngine(QObject):
         if self._rig_want and not self.rig.is_connected \
                 and now - self._rig_retry_t > 10.0:
             self._rig_retry_t = now
+            logger.warning("rig reconnecting")
             self.statusMessage.emit("rig: reconnecting…")
             self.rig.connect_rig(self.cfg.rig_host, self.cfg.rig_port,
                                  self.cfg.rig_split, self.cfg.rig_mode)
@@ -478,7 +519,7 @@ class RadioEngine(QObject):
             return
         fmin, fmax = self._decode_window()
         job = {
-            "audio": avail[self._rt_fed:], "mode": self.mode, "band": self.band,
+            "audio": avail[self._rt_fed:].copy(), "mode": self.mode, "band": self.band,
             "cycle": cycle, "cstart": cstart, "tag": "rt",
             "new_cycle": self._rt_fed == 0,
             "freq_min": fmin, "freq_max": fmax,
@@ -503,7 +544,7 @@ class RadioEngine(QObject):
             return
         fmin, fmax = self._decode_window()
         self._jobq.append({
-            "audio": audio, "mode": self.mode, "band": self.band,
+            "audio": audio.copy(), "mode": self.mode, "band": self.band,
             "cycle": cycle, "cstart": cstart, "tag": tag,
             "freq_min": fmin, "freq_max": fmax,
             "depth": self.cfg.decode_depth,
@@ -533,19 +574,25 @@ class RadioEngine(QObject):
         seen = self._seen.setdefault(cycle, set())
         rows: list[DecodeRow] = []
         worked = self.log.worked_calls()
+        worked_dxcc = self.log.worked_dxcc()
+        worked_grids = self.log.worked_grids()
         for r in results:
             if r.message in seen:
                 continue
             seen.add(r.message)
-            rows.append(self._make_row(r, cycle, cstart, worked))
+            rows.append(self._make_row(r, cycle, cstart, worked,
+                                       worked_dxcc, worked_grids))
         if rows:
             self.decodesReady.emit(rows)
             for row in rows:
                 self.reporter.report_decode(row)
+                self._log_spot(row)
+                self._maybe_alert(row)
                 self._auto_sequence(row)
         self._pump_jobs()
 
-    def _make_row(self, r, cycle: int, cstart: float, worked: set) -> DecodeRow:
+    def _make_row(self, r, cycle: int, cstart: float, worked: set,
+                  worked_dxcc: set, worked_grids: set) -> DecodeRow:
         pm = seq.parse(r.message)
         rf = self.dial_hz + r.freq
         de_base = seq.base_call(pm.de) if pm.de else ""
@@ -554,6 +601,8 @@ class RadioEngine(QObject):
             db = geo.distance_bearing(self.cfg.my_grid, pm.grid)
             if db is not None:
                 dist, bearing = db
+        ent = dxcc.lookup(de_base) if de_base else None
+        country = ent.name if ent else ""
         row = DecodeRow(
             time_utc=cstart + self.spec.tx_offset,
             cycle=cycle, mode=self.mode, band=self.band, message=r.message,
@@ -563,9 +612,38 @@ class RadioEngine(QObject):
             is_cq=pm.is_cq, directed_cq=pm.cq_dir, de=de_base, grid=pm.grid,
             worked_before=de_base in worked if de_base else False,
             new_call=bool(de_base) and de_base not in worked,
+            country=country, continent=ent.continent if ent else "",
+            new_dxcc=bool(country) and country not in worked_dxcc,
+            new_grid=bool(pm.grid) and pm.grid[:4] not in worked_grids,
             distance_km=dist, bearing_deg=bearing,
             parsed=pm)
         return row
+
+    def _log_spot(self, row: DecodeRow) -> None:
+        self.spots.log_decode(
+            dt.datetime.fromtimestamp(row.time_utc, dt.timezone.utc),
+            self.dial_hz / 1e6, row.mode, row.snr, row.dt,
+            row.freq_audio, row.message)
+
+    def _maybe_alert(self, row: DecodeRow) -> None:
+        """Audible/status alert for the things WSJT-X ops watch for."""
+        if not self.cfg.sound_alerts:
+            return
+        reason = ""
+        if row.to_me:
+            reason = "addressed to you"
+        elif row.is_cq and row.new_dxcc and self.cfg.alert_new_dxcc:
+            reason = f"new DXCC: {row.country}"
+        elif row.is_cq and row.new_grid and self.cfg.alert_new_grid:
+            reason = f"new grid: {row.grid}"
+        if reason:
+            logger.info("decode alert: %s (%s)", row.message, reason)
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.beep()
+            except Exception:
+                pass
+            self.statusMessage.emit(f"♪ {row.de or row.message}  ({reason})")
 
     def _auto_sequence(self, row: DecodeRow) -> None:
         if not self.cfg.auto_seq or not self.cfg.my_call:
@@ -605,7 +683,8 @@ class RadioEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def _maybe_transmit(self, cycle: int, cstart: float, t: float, now: float) -> None:
-        if self._txing or not self.tx_enabled or cycle == self._tx_cycle:
+        if self._txing or self._tuning or not self.tx_enabled \
+                or cycle == self._tx_cycle:
             return
         parity = cycle % 2
         want = 1 if self.cfg.tx_odd else 0
@@ -615,6 +694,7 @@ class RadioEngine(QObject):
         if not (0.0 <= t <= 0.40):
             return
         if self.cfg.tx_watchdog_min and now > self._watchdog_deadline:
+            logger.warning("tx watchdog expired; halting transmission")
             self.statusMessage.emit("Tx watchdog: halting")
             self.halt_tx()
             return
@@ -629,6 +709,7 @@ class RadioEngine(QObject):
         try:
             wave = self._render_tx(msg, self.tx_freq - split_offset)
         except Exception as e:
+            logger.exception("failed to encode transmit message %s", msg)
             self.statusMessage.emit(f"encode failed: {e}")
             return
         skip = int(max(0.0, t_in_cycle) * ft8lib.SAMPLE_RATE)
@@ -637,6 +718,7 @@ class RadioEngine(QObject):
         self._txing = True
         self._tx_idx = idx
         self._qso_time_on = self._qso_time_on or time.time()
+        logger.info("tx started: %s", msg)
         if self.rig.is_connected and self.cfg.ptt_method == "rigctld":
             if self.cfg.rig_split:
                 self.rig.set_split(True, self.dial_hz + split_offset)
@@ -644,9 +726,12 @@ class RadioEngine(QObject):
         self.txStateChanged.emit(True, msg)
         self._report_status()
         self.statusMessage.emit(f"Tx: {msg}")
+        self.spots.log_tx(dt.datetime.now(dt.timezone.utc), self.dial_hz / 1e6,
+                          self.mode, self.tx_freq, msg)
         try:
             self.tx.play(wave, on_done=lambda: self._txFinished.emit(idx))
         except Exception as e:
+            logger.exception("failed to start tx audio for %s", msg)
             self.statusMessage.emit(f"Tx audio failed: {e}")
             self._end_tx()
 
@@ -680,6 +765,72 @@ class RadioEngine(QObject):
         grid = (self.cfg.my_grid or "AA00")[:4]
         return f"{self.cfg.my_call} {grid} {self.cfg.tx_power_dbm}"
 
+    # ------------------------------------------------------------------ #
+    # tune (continuous single tone, for ATU / amplifier tuning)
+    # ------------------------------------------------------------------ #
+
+    def set_tune(self, on: bool) -> None:
+        """Key the radio with a steady carrier tone at the Tx frequency.
+
+        This is the WSJT-X *Tune* button: a continuous single tone for tuning
+        an ATU or setting amplifier drive. It runs until toggled off (or any
+        normal transmit / Halt intervenes). Playing a short buffer that
+        re-arms itself keeps the tone going without a giant pre-rendered
+        waveform, and lets it stop the instant the operator clicks off.
+        """
+        if on == self._tuning:
+            return
+        if on:
+            if self._txing:
+                return
+            logger.info("tune started")
+            self._tuning = True
+            offset = self._split_offset()
+            if self.rig.is_connected and self.cfg.ptt_method == "rigctld":
+                if self.cfg.rig_split:
+                    self.rig.set_split(True, self.dial_hz + offset)
+                self.rig.set_ptt(True)
+            self.txStateChanged.emit(True, "TUNE")
+            self._report_status()
+            self.statusMessage.emit("Tune")
+            self._play_tune_chunk(offset)
+        else:
+            logger.info("tune stopped")
+            self._tuning = False
+            self.tx.stop()
+            if self.rig.is_connected and self.cfg.ptt_method == "rigctld":
+                self.rig.set_ptt(False)
+            self.txStateChanged.emit(False, "")
+            self._report_status()
+            self.statusMessage.emit("Tune off")
+
+    def _play_tune_chunk(self, offset: int) -> None:
+        tone = self._render_tone(self.tx_freq - offset, 0.5)
+        try:
+            self.tx.play(tone, on_done=lambda: self._tuneFinished.emit())
+        except Exception as e:
+            logger.exception("failed to start tune audio")
+            self.statusMessage.emit(f"Tune audio failed: {e}")
+            self.set_tune(False)
+
+    def _on_tune_finished(self) -> None:
+        # Re-arm to keep the carrier up until the operator stops tuning.
+        if self._tuning:
+            self._play_tune_chunk(self._split_offset())
+
+    def _render_tone(self, hz: float, seconds: float) -> np.ndarray:
+        n = int(seconds * ft8lib.SAMPLE_RATE)
+        t = np.arange(n, dtype=np.float64) / ft8lib.SAMPLE_RATE
+        wave = 0.9 * np.sin(2.0 * np.pi * float(hz) * t)
+        # Short raised-cosine ramps at the ends avoid key clicks when the
+        # 0.5 s chunks butt together.
+        ramp = int(0.005 * ft8lib.SAMPLE_RATE)
+        if ramp and n > 2 * ramp:
+            env = 0.5 * (1 - np.cos(np.linspace(0, np.pi, ramp)))
+            wave[:ramp] *= env
+            wave[-ramp:] *= env[::-1]
+        return wave
+
     def _on_tx_finished(self, idx: int) -> None:
         self._end_tx()
         log = self.seq.on_transmitted(idx)
@@ -689,6 +840,8 @@ class RadioEngine(QObject):
             self._commit_log(log.dxcall, log.dxgrid, log.report_sent, log.report_recv)
 
     def _end_tx(self) -> None:
+        if self._txing or self._tuning:
+            logger.info("tx ended")
         self.tx.stop()
         if self.rig.is_connected and self.cfg.ptt_method == "rigctld":
             self.rig.set_ptt(False)
@@ -701,7 +854,7 @@ class RadioEngine(QObject):
     # ------------------------------------------------------------------ #
 
     def _commit_log(self, dxcall: str, dxgrid: str,
-                    report_sent: int, report_recv: Optional[int]) -> None:
+                report_sent: int, report_recv: Optional[int]) -> None:
         now = dt.datetime.now(dt.timezone.utc)
         t_on = dt.datetime.fromtimestamp(self._qso_time_on or now.timestamp(),
                                          dt.timezone.utc)
@@ -782,6 +935,8 @@ class RadioEngine(QObject):
         self.seq.set_station(cfg.my_call, cfg.my_grid)
         self.seq.use_rr73 = True
         self.tx.level = cfg.tx_audio_level
+        self.spots.path = cfg.resolved_all_txt()
+        self.spots.enabled = cfg.all_txt
         self.reporter.apply_config(cfg)
         self._emit_tx_messages()
         self._report_status()

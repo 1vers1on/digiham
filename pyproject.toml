@@ -13,7 +13,7 @@ authors = [
     { name = "Ellie", email = "ellie@ellierf.com" },
 ]
 dependencies = [
-    "ft8lib>=1.3.0",
+    "ft8lib>=1.3.2",
     "numpy",
     "scipy",
     "PySide6>=6.6",

@@ -150,6 +150,8 @@ class SettingsDialog(QDialog):
         self.c_dcqsy.setChecked(self.cfg.double_click_qsy)
         self.c_cqonly = QCheckBox("Band Activity shows CQ only")
         self.c_cqonly.setChecked(self.cfg.cq_only)
+        self.c_hidework = QCheckBox("Band Activity hides stations worked before")
+        self.c_hidework.setChecked(self.cfg.hide_worked)
         self.s_wd = QSpinBox(); self.s_wd.setRange(0, 60)
         self.s_wd.setValue(self.cfg.tx_watchdog_min); self.s_wd.setSuffix(" min")
         f.addRow(self.c_autoseq)
@@ -157,7 +159,21 @@ class SettingsDialog(QDialog):
         f.addRow(self.c_autolog)
         f.addRow(self.c_dcqsy)
         f.addRow(self.c_cqonly)
+        f.addRow(self.c_hidework)
         f.addRow("Tx watchdog (0 = off)", self.s_wd)
+
+        alerts = QGroupBox("Alerts")
+        af = QFormLayout(alerts)
+        self.c_sound = QCheckBox("Play a sound for the events below")
+        self.c_sound.setChecked(self.cfg.sound_alerts)
+        self.c_newdxcc = QCheckBox("Highlight / alert new DXCC entities")
+        self.c_newdxcc.setChecked(self.cfg.alert_new_dxcc)
+        self.c_newgrid = QCheckBox("Alert new grid squares")
+        self.c_newgrid.setChecked(self.cfg.alert_new_grid)
+        af.addRow(self.c_sound)
+        af.addRow(self.c_newdxcc)
+        af.addRow(self.c_newgrid)
+        f.addRow(alerts)
         return w
 
     def _reporting_tab(self) -> QWidget:
@@ -171,10 +187,13 @@ class SettingsDialog(QDialog):
         self.s_udp_port.setValue(self.cfg.udp_port)
         self.e_udp_id = QLineEdit(self.cfg.udp_id)
         self.e_udp_id.setPlaceholderText("digiham")
+        self.c_alltxt = QCheckBox("Write an ALL.TXT spot log (WSJT-X style)")
+        self.c_alltxt.setChecked(self.cfg.all_txt)
         f.addRow(self.c_udp)
         f.addRow("UDP server host", self.e_udp_host)
         f.addRow("UDP server port", self.s_udp_port)
         f.addRow("Instance id", self.e_udp_id)
+        f.addRow(self.c_alltxt)
         note = QLabel("Sends the same UDP datagrams as WSJT-X so companions "
                       "like GridTracker and JTAlert can follow digiham. Point "
                       "them at this host/port (WSJT-X default is 2237).")
@@ -237,11 +256,16 @@ class SettingsDialog(QDialog):
         c.auto_log = self.c_autolog.isChecked()
         c.double_click_qsy = self.c_dcqsy.isChecked()
         c.cq_only = self.c_cqonly.isChecked()
+        c.hide_worked = self.c_hidework.isChecked()
+        c.sound_alerts = self.c_sound.isChecked()
+        c.alert_new_dxcc = self.c_newdxcc.isChecked()
+        c.alert_new_grid = self.c_newgrid.isChecked()
         c.tx_watchdog_min = self.s_wd.value()
         c.udp_enabled = self.c_udp.isChecked()
         c.udp_host = self.e_udp_host.text().strip() or "127.0.0.1"
         c.udp_port = self.s_udp_port.value()
         c.udp_id = self.e_udp_id.text().strip() or "digiham"
+        c.all_txt = self.c_alltxt.isChecked()
         c.theme = self.cb_theme.currentText()
         c.waterfall_palette = self.cb_wf.currentText()
         c.waterfall_gain = self.s_wfg.value()

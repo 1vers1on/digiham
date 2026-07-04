@@ -10,7 +10,8 @@ from ..engine import DecodeRow
 from .. import geo
 from .theme import PALETTE
 
-_COLS = ["UTC", "dB", "DT", "Freq", "km", "Message"]
+_COLS = ["UTC", "dB", "DT", "Freq", "km", "Country", "Message"]
+_MSG_COL = 6
 _MAX_ROWS = 1000
 
 
@@ -29,7 +30,7 @@ class DecodeTable(QTableWidget):
         self.setAlternatingRowColors(True)
         h = self.horizontalHeader()
         h.setStretchLastSection(True)
-        for i, wdt in enumerate((60, 42, 48, 56, 46)):
+        for i, wdt in enumerate((60, 42, 48, 56, 46, 96)):
             self.setColumnWidth(i, wdt)
         self.itemDoubleClicked.connect(self._on_double)
 
@@ -44,7 +45,9 @@ class DecodeTable(QTableWidget):
         self.insertRow(row)
         freq = f"{d.freq_audio:4.0f}"
         km = geo.short_distance(d.distance_km) if d.distance_km is not None else ""
-        cells = [d.utc_hhmmss, f"{d.snr:+.0f}", f"{d.dt:+.1f}", freq, km, d.message]
+        country = d.country if d.continent != "NA" else ""   # de-clutter home
+        cells = [d.utc_hhmmss, f"{d.snr:+.0f}", f"{d.dt:+.1f}", freq, km,
+                 country, d.message]
         bg, fg, bold = self._style(d)
         for col, text in enumerate(cells):
             it = QTableWidgetItem(text)
@@ -52,12 +55,22 @@ class DecodeTable(QTableWidget):
                 it.setBackground(QBrush(QColor(bg)))
             if fg is not None:
                 it.setForeground(QBrush(QColor(fg)))
-            if bold and col == 5:
+            if bold and col == _MSG_COL:
                 f = QFont(); f.setBold(True); it.setFont(f)
             if col in (1, 2, 3, 4):
                 it.setTextAlignment(Qt.AlignmentFlag.AlignRight
                                     | Qt.AlignmentFlag.AlignVCenter)
             self.setItem(row, col, it)
+        # Highlight a new DXCC entity on the Country cell.
+        if d.new_dxcc and d.country:
+            cc = self.item(row, 5)
+            cc.setForeground(QBrush(QColor(PALETTE["amber"])))
+            f = QFont(); f.setBold(True); cc.setFont(f)
+            cc.setText(f"★ {d.country}")
+        if d.country:
+            self.item(row, 5).setToolTip(
+                f"{d.country} ({d.continent})"
+                + ("  — NEW" if d.new_dxcc else ""))
         if d.bearing_deg is not None:
             self.item(row, 4).setToolTip(f"{d.bearing_deg:.0f}° from you")
         self.item(row, 0).setData(Qt.ItemDataRole.UserRole, d)

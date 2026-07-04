@@ -16,9 +16,13 @@ computes that offset; this module just applies it.
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
 
 from .rigctl import RigctlClient, RigctldError, normalize_mode
+
+logger = logging.getLogger(__name__)
 
 # Hamlib level names for the meters we poll, keyed by the name used in the
 # meters dict. Split by when they are meaningful.
@@ -48,12 +52,14 @@ class _RigWorker(QObject):
         self._mode = mode
         self._poll_fails = 0
         try:
+            logger.info("connecting to rigctld at %s:%s", host, port)
             self._client = RigctlClient(host, port)
             self._client.connect()
             if mode:
                 try:
                     self._ensure_mode(mode)
                 except (RigctldError, ValueError) as e:
+                    logger.warning("failed to set rig mode during connect: %s", e)
                     self.failed.emit(f"set mode: {e}")
             freq = self._client.get_freq()
             real_mode, _width = self._client.get_mode()
@@ -62,6 +68,7 @@ class _RigWorker(QObject):
             self.telemetry.emit(freq, real_mode, False)
         except (OSError, RigctldError, ValueError) as e:
             self._client = None
+            logger.exception("rig connection failed")
             self.connected.emit(False, str(e))
 
     def _discover_meters(self) -> None:
@@ -84,6 +91,7 @@ class _RigWorker(QObject):
                 pass
             self._client.close()
             self._client = None
+        logger.info("rig disconnected")
         self.connected.emit(False, "disconnected")
 
     @Slot(float)
@@ -93,6 +101,7 @@ class _RigWorker(QObject):
         try:
             self._client.set_freq(hz)
         except (OSError, RigctldError) as e:
+            logger.warning("failed to set rig frequency to %s: %s", hz, e)
             self.failed.emit(f"set freq: {e}")
 
     @Slot(str)
@@ -103,6 +112,7 @@ class _RigWorker(QObject):
         try:
             self._ensure_mode(mode)
         except (OSError, RigctldError, ValueError) as e:
+            logger.warning("failed to set rig mode to %s: %s", mode, e)
             self.failed.emit(f"set mode: {e}")
 
     def _ensure_mode(self, mode: str) -> None:
@@ -133,6 +143,7 @@ class _RigWorker(QObject):
             else:
                 self._client.set_split_vfo(False, "VFOA")
         except (OSError, RigctldError) as e:
+            logger.warning("failed to set split %s at %s: %s", split, tx_dial_hz, e)
             self.failed.emit(f"split: {e}")
 
     @Slot(bool)
@@ -142,6 +153,7 @@ class _RigWorker(QObject):
         try:
             self._client.set_ptt(on)
         except (OSError, RigctldError) as e:
+            logger.warning("failed to set ptt %s: %s", on, e)
             self.failed.emit(f"ptt: {e}")
 
     @Slot()
@@ -157,6 +169,7 @@ class _RigWorker(QObject):
             # dead rigctld should be reported instead of silently ignored
             self._poll_fails += 1
             if self._poll_fails >= 3:
+                logger.warning("rig connection lost after repeated poll failures: %s", e)
                 self._drop(f"rig connection lost: {e}")
             return
         self._poll_fails = 0

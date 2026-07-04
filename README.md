@@ -13,7 +13,18 @@ Hamlib's `rigctld`, and Qt 6 (PySide6).
   CQ (or enable *Call 1st*) and digiham runs Tx1→Tx5, tracks the reports
   both ways, and closes the contact — no clicking required.
 - **Automatic ADIF logging** on RR73/73, with duplicate suppression, a log
-  viewer, and one-click ADIF export (LoTW / QRZ / Club Log compatible).
+  viewer with worked-DXCC/grid/band tallies, and one-click ADIF export
+  (LoTW / QRZ / Club Log compatible).
+- **DXCC / country awareness**: every decode is tagged with the sending
+  station's country and continent, unworked entities are flagged with a ★,
+  and you can get an audible alert (and hide already-worked stations) — the
+  award-chasing workflow WSJT-X users rely on, built in.
+- **Tune button**: a steady carrier for tuning an ATU or setting amplifier
+  drive, with the same split/PTT handling as a normal transmission.
+- **ALL.TXT spot log** in WSJT-X's format, so operators and tools that grep
+  or tail that file work unchanged.
+- **Keyboard shortcuts** for the common actions: Esc halt, Ctrl+E enable Tx,
+  Ctrl+T tune, Ctrl+R CQ, Ctrl+L log, Alt+↑/↓ nudge Rx.
 - **Rig control via `rigctld`** on a background thread: QSY on band change,
   split operation, and PTT keying — nothing blocks the UI.
 - **Spectrum + waterfall** with click-to-tune Rx/Tx cursors and selectable

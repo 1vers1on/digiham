@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup, QComboBox, QCheckBox, QFileDialog, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._build_ui()
+        self._build_shortcuts()
         self._wire_engine()
         self._apply_visual_config()
 
@@ -122,6 +123,23 @@ class MainWindow(QMainWindow):
         self.waterfall.rxClicked.connect(self.engine.set_rx_freq)
         self.waterfall.txClicked.connect(self.engine.set_tx_freq)
         self.waterfall.paletteChanged.connect(self._on_waterfall_palette)
+
+    def _build_shortcuts(self) -> None:
+        """WSJT-X-style keyboard shortcuts for the common operating actions."""
+        def sc(seq: str, fn) -> None:
+            s = QShortcut(QKeySequence(seq), self)
+            s.activated.connect(fn)
+
+        sc("Esc", self.engine.halt_tx)                       # stop everything
+        sc("Ctrl+E", lambda: self.tx_btn.toggle())           # Enable Tx
+        sc("Ctrl+T", lambda: self.tune_btn.toggle())         # Tune
+        sc("Ctrl+R", self._call_cq)                          # call CQ
+        sc("Ctrl+L", self.engine.log_current_qso)            # log current QSO
+        sc("Alt+Up", lambda: self._nudge_rx(1))
+        sc("Alt+Down", lambda: self._nudge_rx(-1))
+
+    def _nudge_rx(self, direction: int) -> None:
+        self.engine.set_rx_freq(self.engine.rx_freq + direction * 10)
 
     def _titled(self, title: str) -> QGroupBox:
         box = QGroupBox(title)
@@ -322,6 +340,17 @@ class MainWindow(QMainWindow):
         self.txodd_chk.setChecked(self.cfg.tx_odd)
         self.txodd_chk.toggled.connect(self.engine.set_tx_odd)
         g.addWidget(self.txodd_chk, 2, 1)
+        self.tune_btn = QPushButton("Tune")
+        self.tune_btn.setObjectName("txButton")
+        self.tune_btn.setCheckable(True)
+        self.tune_btn.setToolTip("Transmit a steady carrier for ATU / amp tuning")
+        self.tune_btn.toggled.connect(self._toggle_tune)
+        g.addWidget(self.tune_btn, 3, 0)
+        self.hidework_chk = QCheckBox("Hide B4")
+        self.hidework_chk.setToolTip("Hide stations already worked from Band Activity")
+        self.hidework_chk.setChecked(self.cfg.hide_worked)
+        self.hidework_chk.toggled.connect(lambda v: self._set_cfg("hide_worked", v))
+        g.addWidget(self.hidework_chk, 3, 1)
         lay.addWidget(oc)
 
         # free text
@@ -394,6 +423,9 @@ class MainWindow(QMainWindow):
         for d in rows:
             if self.cfg.cq_only and not d.is_cq and not d.to_me:
                 pass
+            elif self.cfg.hide_worked and d.worked_before and not d.to_me \
+                    and not d.new_dxcc:
+                pass
             else:
                 self.band_table.add_decode(d)
             if d.to_me or abs(d.freq_audio - self.engine.rx_freq) < 10 \
@@ -419,12 +451,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_tx_state(self, txing: bool, msg: str) -> None:
+        tuning = txing and msg == "TUNE"
+        self._updating = True
+        self.tune_btn.setChecked(tuning)
+        self._updating = False
         if txing:
-            self.statusBar().showMessage(f"◉ TRANSMITTING: {msg}")
+            label = "◉ TUNING" if tuning else f"◉ TRANSMITTING: {msg}"
+            self.statusBar().showMessage(label)
             self.cycle_bar.setStyleSheet(
                 f"QProgressBar::chunk{{background:{PALETTE['red']};}}")
         else:
             self.cycle_bar.setStyleSheet("")
+
+    def _toggle_tune(self, on: bool) -> None:
+        if self._updating:
+            return
+        self.engine.set_tune(on)
 
     def _on_tx_enable(self, on: bool) -> None:
         self._updating = True
@@ -451,11 +493,16 @@ class MainWindow(QMainWindow):
             txt = (f"{'CQ' if s['calling_cq'] else 'DX'} {s['dxcall']} "
                    f"{s['dxgrid']}  sent {s['report_out']:+d}"
                    + (f"  rcvd {rin:+d}" if rin is not None else ""))
+            from .. import dxcc
+            country = dxcc.country(s["dxcall"])
+            if country:
+                txt += f"\n{country}"
             if s["dxgrid"] and self.cfg.my_grid:
                 from .. import geo
                 db = geo.distance_bearing(self.cfg.my_grid, s["dxgrid"])
                 if db is not None:
-                    txt += f"\n{db[0]:.0f} km  @ {db[1]:.0f}°"
+                    sep = "  ·  " if country else "\n"
+                    txt += f"{sep}{db[0]:.0f} km @ {db[1]:.0f}°"
             self.qso_status.setText(txt)
         else:
             self.qso_status.setText("—")
@@ -600,6 +647,7 @@ class MainWindow(QMainWindow):
             self._apply_visual_config()
             self.autoseq_chk.setChecked(new.auto_seq)
             self.callfirst_chk.setChecked(new.call_first)
+            self.hidework_chk.setChecked(new.hide_worked)
             if audio_changed:
                 self.engine.restart_audio()
             if font_changed or theme_changed:
@@ -631,8 +679,10 @@ class MainWindow(QMainWindow):
             self, "About digiham",
             "<h3>digiham</h3>"
             "<p>FT8 / FT4 / WSPR operating frontend with rig control, "
-            "auto-sequencing and ADIF logging.</p>"
-            "<p>Built on ft8lib, Hamlib rigctld and PySide6.</p>")
+            "auto-sequencing, DXCC awareness and ADIF logging.</p>"
+            "<p>Built on ft8lib, Hamlib rigctld and PySide6.</p>"
+            "<p style='color:#888'><b>Shortcuts:</b> Esc halt · Ctrl+E enable Tx · "
+            "Ctrl+T tune · Ctrl+R CQ · Ctrl+L log · Alt+↑/↓ nudge Rx</p>")
 
     def _first_run_hint(self) -> None:
         QMessageBox.information(

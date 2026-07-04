@@ -147,6 +147,40 @@ class QsoLog:
             if r.band == band and r.mode.upper() == mode.upper()
         }
 
+    def worked_grids(self) -> set[str]:
+        """Set of 4-character grid squares already in the log."""
+        return {r.gridsquare.upper()[:4] for r in self.records
+                if len(r.gridsquare) >= 4}
+
+    def worked_dxcc(self) -> set[str]:
+        """Set of DXCC entity names already worked (resolved from calls)."""
+        from . import dxcc
+        out: set[str] = set()
+        for r in self.records:
+            name = dxcc.country(r.call)
+            if name:
+                out.add(name)
+        return out
+
+    def stats(self) -> dict:
+        """Quick award-chasing tallies over the whole log."""
+        from . import dxcc
+        bands: set[str] = set()
+        modes: set[str] = set()
+        for r in self.records:
+            if r.band:
+                bands.add(r.band)
+            if r.mode:
+                modes.add(r.mode.upper())
+        return {
+            "qsos": len(self.records),
+            "calls": len(self.worked_calls()),
+            "dxcc": len(self.worked_dxcc()),
+            "grids": len(self.worked_grids()),
+            "bands": len(bands),
+            "modes": len(modes),
+        }
+
     def export(self, path: Path, records: Optional[Iterable[Qso]] = None) -> int:
         recs = list(records) if records is not None else self.records
         path = Path(path)

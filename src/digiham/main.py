@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import signal
 import sys
+
+
+def _configure_logging() -> None:
+    level_name = os.environ.get("DIGIHAM_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 def main() -> None:
@@ -13,7 +24,10 @@ def main() -> None:
     from .gui.mainwindow import MainWindow
     from .gui.theme import apply_theme
 
+    _configure_logging()
+    log = logging.getLogger(__name__)
     cfg = config.load()
+    log.info("starting digiham")
 
     app = QApplication(sys.argv)
     app.setApplicationName("digiham")
@@ -25,7 +39,9 @@ def main() -> None:
 
     win = MainWindow(cfg)
     win.show()
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    log.info("exiting digiham with code %s", exit_code)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

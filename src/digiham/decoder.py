@@ -12,12 +12,15 @@ resolve over time.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 import ft8lib
+
+logger = logging.getLogger(__name__)
 
 
 class _DecodeWorker(QObject):
@@ -40,6 +43,7 @@ class _DecodeWorker(QObject):
             results = self._decode(job)
         except Exception as e:                     # never kill the thread
             results = []
+            logger.exception("decode job failed")
             self.failed.emit(f"decode error: {e}")
         meta = dict(job)
         meta.pop("audio", None)
@@ -88,7 +92,7 @@ class _DecodeWorker(QObject):
         try:
             self.hashes.set_station(mycall, dxcall)
         except Exception:
-            pass
+            logger.exception("failed to prime decoder station hashes")
 
 
 class DecodeController(QObject):

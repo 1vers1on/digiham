@@ -49,6 +49,14 @@ def dial_for(band: str, mode: str) -> int | None:
     return getattr(entry, mode.lower(), None)
 
 
+def first_band_for(mode: str) -> str | None:
+    """First band (in display order) that has a standard dial for *mode*."""
+    for band in BAND_ORDER:
+        if dial_for(band, mode) is not None:
+            return band
+    return None
+
+
 def band_for_freq(freq_hz: float) -> str | None:
     """Best-guess band name containing an RF frequency, for logging."""
     edges = [
