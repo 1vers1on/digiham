@@ -17,7 +17,7 @@ from typing import Iterable, Optional
 logger = logging.getLogger(__name__)
 
 APP_NAME = "digiham"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 @dataclass(frozen=True)

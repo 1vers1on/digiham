@@ -86,7 +86,7 @@ pyinstaller packaging/digiham.spec --noconfirm # -> dist/digiham (dist/digiham.a
 # then, per platform:
 bash packaging/linux/build-appimage.sh                       # -> dist/*.AppImage
 bash packaging/macos/build-dmg.sh                            # -> dist/*.dmg   (macOS)
-iscc /DMyAppVersion=1.0.0 packaging\windows\digiham.iss      # -> dist/*setup.exe (Windows, Inno Setup)
+iscc /DMyAppVersion=1.0.1 packaging\windows\digiham.iss      # -> dist/*setup.exe (Windows, Inno Setup)
 ```
 
 The app icon lives in [`assets/logo.svg`](assets/logo.svg); regenerate the
