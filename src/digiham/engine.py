@@ -1044,7 +1044,7 @@ class RadioEngine(QObject):
     def _emit_spectrum(self) -> None:
         if not self.capture:
             return
-        raw = self.capture.latest(4096 / self.capture.fs)
+        raw = self.capture.latest(8192 / self.capture.fs)
         if raw is None or len(raw) < 256:
             return
         n = 1 << int(np.floor(np.log2(len(raw))))
