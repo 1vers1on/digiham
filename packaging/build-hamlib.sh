@@ -15,7 +15,7 @@
 # Works on Linux, macOS, and Windows (under an MSYS2 / MinGW bash). Hamlib is
 # linked *statically* so rigctld is a single self-contained binary with no
 # libhamlib to chase at load time; only third-party deps (libusb, …) may remain
-# dynamic, and PyInstaller's dependency scan bundles those.
+# dynamic, and we stage those DLLs explicitly on Windows.
 #
 # Usage:  packaging/build-hamlib.sh [--clean]
 set -euo pipefail
@@ -105,6 +105,26 @@ if [ "${#libs[@]}" -gt 0 ]; then
   echo "Staged shared libs: ${libs[*]##*/}"
 fi
 shopt -u nullglob
+
+# On Windows, a mostly-static rigctld can still depend on a few MinGW DLLs
+# (notably libusb-1.0.dll). Put those beside rigctld.exe so it runs on hosts
+# without an MSYS2/MinGW installation.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v ldd >/dev/null 2>&1; then
+      mapfile -t dlls < <(
+        ldd "$stage/bin/rigctld$exe_suffix" 2>/dev/null \
+          | sed -nE 's/.*=>[[:space:]]+(\/[^[:space:]]+\.dll).*/\1/p' \
+          | grep -E '^/(mingw64|ucrt64|clang64|clangarm64)/bin/' \
+          | sort -u
+      )
+      if [ "${#dlls[@]}" -gt 0 ]; then
+        cp "${dlls[@]}" "$stage/bin/"
+        echo "Staged runtime DLLs: ${dlls[*]##*/}"
+      fi
+    fi
+    ;;
+esac
 
 echo "Done. rigctld -> $stage/bin/rigctld$exe_suffix"
 "$stage/bin/rigctld$exe_suffix" --version || true
