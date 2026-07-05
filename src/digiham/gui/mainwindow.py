@@ -481,8 +481,10 @@ class MainWindow(QMainWindow):
         return d.parsed.kind in (K_73, K_RR73, K_RRR)
 
     def _on_new_cycle(self, _cycle: int) -> None:
-        self.band_table.mark_cycle()
-        self.rx_table.mark_cycle()
+        utc = dt.datetime.now(dt.timezone.utc).strftime("%H:%M:%S")
+        label = f"{self.engine.band}  ·  {utc} UTC"
+        self.band_table.mark_cycle(label)
+        self.rx_table.mark_cycle(label)
 
     def _on_cycle_tick(self, frac: float, _cycle: int) -> None:
         self.cycle_bar.setValue(int(frac * 100))

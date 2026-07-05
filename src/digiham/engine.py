@@ -33,6 +33,7 @@ from .audio import Capture, TxPlayer
 from .config import Config, config_dir
 from .decoder import DecodeController
 from .plugins import PluginContext, PluginManager
+from .pskreporter import PskReporter
 from .rig import RigConnect, RigController
 from .spotlog import SpotLog
 from .wsjtx import WsjtxReporter
@@ -143,6 +144,7 @@ class RadioEngine(QObject):
         self.decoder = DecodeController(self)
         self.rig = RigController(self)
         self.reporter = WsjtxReporter(cfg, self)
+        self.psk = PskReporter(cfg, self)
 
         self.plugins = PluginManager(
             PluginContext(self, config_dir() / "plugin_data"),
@@ -228,6 +230,7 @@ class RadioEngine(QObject):
         self._tick_timer.start()
         self._spec_timer.start()
         self.reporter.start()
+        self.psk.start()
         self._emit_tx_messages()
         self._emit_seq_state()
         self._report_status()
@@ -248,6 +251,7 @@ class RadioEngine(QObject):
         self.rig.shutdown()
         self.decoder.shutdown()
         self.reporter.stop()
+        self.psk.stop()
         self.plugins.unload()
 
     def _start_capture(self) -> None:
@@ -690,6 +694,7 @@ class RadioEngine(QObject):
             self.decodesReady.emit(rows)
             for row in rows:
                 self.reporter.report_decode(row)
+                self.psk.report_decode(row)
                 self._log_spot(row)
                 self._maybe_alert(row)
                 self._auto_sequence(row)

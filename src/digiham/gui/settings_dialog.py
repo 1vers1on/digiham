@@ -348,6 +348,8 @@ class SettingsDialog(QDialog):
     def _reporting_tab(self) -> QWidget:
         w = QWidget()
         f = QFormLayout(w)
+        self.c_psk = QCheckBox("Report spots to PSK Reporter (pskreporter.info)")
+        self.c_psk.setChecked(self.cfg.pskreporter)
         self.c_udp = QCheckBox("Broadcast WSJT-X UDP messages")
         self.c_udp.setChecked(self.cfg.udp_enabled)
         self.e_udp_host = QLineEdit(self.cfg.udp_host)
@@ -361,6 +363,12 @@ class SettingsDialog(QDialog):
         self.c_daily = QCheckBox("Also write a dated ADIF file per day "
                                  "(digiham_YYYYMMDD.adi)")
         self.c_daily.setChecked(self.cfg.adif_daily_files)
+        f.addRow(self.c_psk)
+        psk_note = QLabel("Uploads your reception reports so pskreporter.info "
+                          "can map who is hearing you. Requires your callsign "
+                          "and grid on the Station tab.")
+        psk_note.setWordWrap(True)
+        f.addRow(psk_note)
         f.addRow(self.c_udp)
         f.addRow("UDP server host", self.e_udp_host)
         f.addRow("UDP server port", self.s_udp_port)
@@ -448,6 +456,7 @@ class SettingsDialog(QDialog):
         c.alert_new_dxcc = self.c_newdxcc.isChecked()
         c.alert_new_grid = self.c_newgrid.isChecked()
         c.tx_watchdog_min = self.s_wd.value()
+        c.pskreporter = self.c_psk.isChecked()
         c.udp_enabled = self.c_udp.isChecked()
         c.udp_host = self.e_udp_host.text().strip() or "127.0.0.1"
         c.udp_port = self.s_udp_port.value()

@@ -102,19 +102,23 @@ class DecodeTable(QTableWidget):
             return PALETTE["hl_newcall"], None, False
         return None, None, False
 
-    def mark_cycle(self) -> None:
-        """Insert a faint separator row at a period boundary, but only when the
-        cycle just ended actually produced decodes — otherwise idle periods
-        would stack up empty separator lines."""
+    def mark_cycle(self, label: str = "") -> None:
+        """Insert a faint separator row at a period boundary, labelled with the
+        current band and UTC time, but only when the cycle just ended actually
+        produced decodes — otherwise idle periods would stack up empty
+        separator lines."""
         if self.rowCount() == 0 or not self._decodes_since_mark:
             return
         self._decodes_since_mark = False
         row = self.rowCount()
         self.insertRow(row)
-        it = QTableWidgetItem("")
+        it = QTableWidgetItem(label)
         it.setBackground(QBrush(QColor(PALETTE["border"])))
+        it.setForeground(QBrush(QColor(PALETTE["text_dim"])))
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        f = QFont(); f.setPointSizeF(f.pointSizeF() * 0.85)
+        it.setFont(f)
         self.setItem(row, 0, it)
         self.setSpan(row, 0, 1, len(_COLS))
-        self.setRowHeight(row, 2)
         if self.rowCount() > _MAX_ROWS:
             self.removeRow(0)
