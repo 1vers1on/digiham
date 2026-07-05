@@ -78,6 +78,9 @@ class SettingsDialog(QDialog):
         # rigctld source: our own private daemon, or one the user runs.
         self.c_managed = QCheckBox("Run a private rigctld (built-in)")
         self.c_managed.setChecked(self.cfg.rig_managed)
+        self.c_managed.setToolTip(
+            "digiham launches its own rigctld: the Hamlib bundled with the "
+            "app, or one found on your system, or the binary set below.")
 
         # -- external rigctld -------------------------------------------------
         self.e_host = QLineEdit(self.cfg.rig_host)
@@ -115,7 +118,10 @@ class SettingsDialog(QDialog):
         self.s_baud.setValue(self.cfg.rig_baud)
         self.s_baud.setSpecialValueText("(default)")
         self.e_path = QLineEdit(self.cfg.rigctld_path)
-        self.e_path.setPlaceholderText("auto-locate rigctld")
+        self.e_path.setPlaceholderText("bundled, then system rigctld")
+        self.e_path.setToolTip(
+            "Leave blank to use the rigctld bundled with digiham, falling back "
+            "to one on your PATH. Set a path here to override both.")
         b_browse = QPushButton("Browse…")
         b_browse.clicked.connect(self._browse_rigctld)
         path_row = QHBoxLayout()

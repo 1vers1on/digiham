@@ -45,6 +45,21 @@ for pkg in ("ft8lib", "sounddevice", "scipy"):
     except Exception:
         pass
 
+# --- bundle the internal Hamlib (rigctld) ----------------------------------
+# packaging/build-hamlib.sh stages a self-contained rigctld (statically linked
+# against libhamlib) under packaging/hamlib/{bin,lib}. Ship it under hamlib/ in
+# the bundle; rigctl._bundled_hamlib_dir() looks there (via sys._MEIPASS) first.
+# Listing rigctld as a "binary" also lets PyInstaller pull in its own shared
+# deps (libusb, …). Missing (no build) just means the app falls back to an
+# external rigctld, so this is best-effort.
+HAMLIB = ROOT / "packaging" / "hamlib"
+for sub in ("bin", "lib"):
+    d = HAMLIB / sub
+    if d.is_dir():
+        for f in d.iterdir():
+            if f.is_file():
+                binaries.append((str(f), f"hamlib/{sub}"))
+
 icon = None
 if is_win:
     icon = str(ASSETS / "digiham.ico")

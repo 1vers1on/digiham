@@ -88,7 +88,8 @@ class Config:
     # When rig_managed is True, host/port above are ignored and digiham
     # launches rigctld itself on a free loopback port.
     rig_managed: bool = False
-    rigctld_path: str = ""        # "" = auto-locate the rigctld binary
+    rigctld_path: str = ""        # "" = bundled rigctld, else one on PATH;
+                                   # set a path to override both
     rig_model: int = 1            # Hamlib model number (1 = Dummy; see rigctld -l)
     # serial/USB device for the built-in rigctld:
     #   "auto" -> auto-detect the radio's USB-serial port (survives replug)

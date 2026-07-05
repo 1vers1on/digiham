@@ -368,6 +368,39 @@ class RigctldStartError(Exception):
     """Raised when a managed rigctld process cannot be started."""
 
 
+def _bundled_hamlib_dir() -> Path | None:
+    """Directory of the rigctld we ship with digiham, or ``None``.
+
+    Two layouts are recognised, mirroring the staging in
+    ``packaging/build-hamlib.sh`` (``<root>/bin/rigctld``, ``<root>/lib/*``):
+
+    * **Frozen app** (PyInstaller): the spec drops the tree under ``hamlib/``
+      inside the bundle, next to which :data:`sys._MEIPASS` points.
+    * **Running from source**: the same ``packaging/hamlib`` staging dir, so a
+      developer who has run ``build-hamlib.sh`` gets the bundled binary too.
+    """
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass) / "hamlib")
+    else:
+        # <repo>/src/digiham/rigctl.py -> <repo>/packaging/hamlib
+        roots.append(Path(__file__).resolve().parents[2] / "packaging" / "hamlib")
+    for root in roots:
+        if (root / "bin" / RIGCTLD_EXE).is_file():
+            return root
+    return None
+
+
+def _bundled_rigctld() -> str | None:
+    """Path to the bundled rigctld binary if one shipped, else ``None``."""
+    root = _bundled_hamlib_dir()
+    if root is None:
+        return None
+    exe = root / "bin" / RIGCTLD_EXE
+    return str(exe) if os.access(exe, os.X_OK) else None
+
+
 def _extra_search_dirs() -> list[Path]:
     """Platform-specific directories to search beyond ``PATH``.
 
@@ -402,10 +435,12 @@ def find_rigctld(explicit: str = "") -> str:
 
     Search order:
 
-    1. *explicit* — a user-supplied path. It may point at the binary
-       itself or at the directory containing it.
-    2. ``PATH`` via :func:`shutil.which`.
-    3. A handful of platform-specific install locations
+    1. *explicit* — a user-supplied path (Settings → rigctld binary). An
+       explicit choice always wins so the user can override everything else.
+       It may point at the binary itself or at the directory containing it.
+    2. The **bundled** rigctld shipped inside digiham (the internal Hamlib).
+    3. ``PATH`` via :func:`shutil.which` (an **external**, system Hamlib).
+    4. A handful of platform-specific install locations
        (see :func:`_extra_search_dirs`).
 
     Raises :class:`FileNotFoundError` if nothing is found.
@@ -419,6 +454,11 @@ def find_rigctld(explicit: str = "") -> str:
             return found
         raise FileNotFoundError(f"rigctld not found at {explicit!r}")
 
+    # Prefer the internal (bundled) Hamlib; fall back to an external one.
+    bundled = _bundled_rigctld()
+    if bundled:
+        return bundled
+
     found = shutil.which(RIGCTLD_EXE)
     if found:
         return found
@@ -427,8 +467,42 @@ def find_rigctld(explicit: str = "") -> str:
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
     raise FileNotFoundError(
-        "rigctld not found on PATH or in the usual locations; install Hamlib "
-        "or set the rigctld path in Settings")
+        "rigctld not found: no bundled copy, none on PATH or in the usual "
+        "locations; install Hamlib or set the rigctld path in Settings")
+
+
+def _subprocess_env(exe: str) -> dict[str, str]:
+    """Environment for launching *exe* so it can load libraries beside it.
+
+    A bundled rigctld sits next to whatever shared libraries it still needs
+    (libhamlib when a shared build slipped through, plus third-party deps such
+    as libusb that PyInstaller drops in the bundle). Those directories are not
+    on the system loader path, so we point the loader at them explicitly. This
+    is harmless for an external rigctld, whose own directory is already
+    resolvable.
+    """
+    env = os.environ.copy()
+    exe_dir = str(Path(exe).resolve().parent)
+    dirs = [exe_dir]
+    bundled = _bundled_hamlib_dir()
+    if bundled is not None:
+        dirs += [str(bundled / "lib"), str(bundled / "bin")]
+    # PyInstaller drops rigctld's own auto-collected deps (libusb, …) in the
+    # bundle root (sys._MEIPASS), not beside the binary — add it so a machine
+    # with no system libusb can still load the bundled daemon.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(str(meipass))
+
+    if sys.platform == "win32":
+        var = "PATH"            # Windows resolves DLLs via PATH (+ the exe dir)
+    elif sys.platform == "darwin":
+        var = "DYLD_LIBRARY_PATH"
+    else:
+        var = "LD_LIBRARY_PATH"
+    existing = env.get(var, "")
+    env[var] = os.pathsep.join(dirs + ([existing] if existing else []))
+    return env
 
 
 def _free_port(host: str = "127.0.0.1") -> int:
@@ -521,7 +595,7 @@ class ManagedRigctld:
         try:
             self._proc = subprocess.Popen(
                 cmd, stdout=self._log, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, **kwargs)
+                stdin=subprocess.DEVNULL, env=_subprocess_env(exe), **kwargs)
         except OSError as e:
             self._close_log()
             raise RigctldStartError(f"could not launch {exe}: {e}") from e

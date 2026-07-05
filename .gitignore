@@ -50,3 +50,7 @@ config.local.*
 *.adi
 *.adif
 *.log
+
+# Bundled Hamlib build output (packaging/build-hamlib.sh)
+/packaging/hamlib/
+/packaging/.hamlib-install/

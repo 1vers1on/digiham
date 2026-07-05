@@ -96,14 +96,35 @@ ImageMagick).
 
 ### Rig control
 
-Start `rigctld` for your radio, e.g. an IC-7300:
+The release builds **bundle Hamlib** — digiham ships its own `rigctld`, so
+rig control works out of the box with nothing else to install. In
+Settings → Radio, tick **Enable rig control**, leave **Run a private rigctld
+(built-in)** on, and pick your radio model and serial device: digiham starts
+and supervises the bundled daemon for you.
+
+digiham resolves `rigctld` in this order: the **bundled** copy first, then any
+`rigctld` on your **PATH** (a system Hamlib), and finally the explicit path you
+set in **rigctld binary** — which overrides both if you want a specific build.
+
+If you'd rather run `rigctld` yourself (or point at one on another host),
+untick **Run a private rigctld** and start it manually, e.g. an IC-7300:
 
 ```bash
 rigctld -m 3073 -r /dev/ttyUSB0 -s 115200
 ```
 
-Then tick **Enable rig control** in Settings → Radio (default
-`localhost:4532`).
+then set the host/port (default `localhost:4532`).
+
+**Building the bundled Hamlib from source** (done automatically in CI; the
+`Hamlib/` source tree is checked in):
+
+```bash
+bash packaging/build-hamlib.sh   # -> packaging/hamlib/bin/rigctld
+```
+
+The PyInstaller spec picks that up and ships it inside the app. Needs the
+autotools toolchain (`autoconf automake libtool`) and libusb headers; on
+Windows the build runs under MSYS2/MinGW and links statically.
 
 ### GridTracker / JTAlert (WSJT-X UDP)
 
