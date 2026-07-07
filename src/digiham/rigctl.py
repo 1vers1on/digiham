@@ -198,7 +198,8 @@ class RigctlClient:
         line = self._readline()
 
         if line.startswith("RPRT"):
-            code = int(line.split()[1])
+            parts = line.split()
+            code = int(parts[1]) if len(parts) > 1 else -999
             if code != 0:
                 raise RigctldError(cmd, code)
             return ""

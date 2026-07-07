@@ -267,7 +267,9 @@ class TxPlayer:
             self._pos = end
 
     def _finished(self):
-        cb = self._on_done
+        with self._lock:
+            cb = self._on_done
+            self._on_done = None
         if cb:
             cb()
 

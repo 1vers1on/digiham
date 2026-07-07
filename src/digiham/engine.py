@@ -63,6 +63,98 @@ _RT_ATTEMPTS = {
     "FT4": (5.6, 6.048),
 }
 
+_SLOT_BW = {"FT8": 50.0, "FT4": 83.3}
+_SLOT_MARGIN = 200
+_SLOT_STEP = 10
+
+
+class AutoSlotTracker:
+    """Track occupied audio frequencies from decodes and find a free slot.
+
+    Phase 1 — find the gap *between* two consecutive occupied zones that is
+    closest to the preferred frequency and wide enough for the signal, then
+    centre the slot in it.  This keeps the slot among active stations with
+    maximum clearance from neighbours and never drifts to the band edges.
+
+    Phase 2 — if no between-signal gap exists (e.g. only one or two signals
+    with overlapping zones), scan outward from preferred and pick the nearest
+    position with at least ``half_excl * 2`` clearance, constrained to the
+    inner passband away from the filter roll-off.
+    """
+
+    def __init__(self) -> None:
+        self._occupied: dict[int, list[float]] = {}
+        self._keep = 2
+
+    def feed(self, cycle: int, freq_audio: float) -> None:
+        self._occupied.setdefault(cycle, []).append(freq_audio)
+
+    def prune(self, cycle: int) -> None:
+        self._occupied = {c: v for c, v in self._occupied.items()
+                          if c >= cycle - self._keep}
+
+    def set_keep(self, cycles: int) -> None:
+        self._keep = max(1, cycles)
+
+    def clear(self) -> None:
+        self._occupied.clear()
+
+    def occupied_freqs(self) -> list[float]:
+        result: list[float] = []
+        for freqs in self._occupied.values():
+            result.extend(freqs)
+        return result
+
+    def find_free(self, mode: str, preferred: int = 1500,
+                  lo: int = 200, hi: int = 3000,
+                  guard: int = 10) -> int:
+        if mode not in _SLOT_BW:
+            return preferred
+        bw = _SLOT_BW[mode]
+        half_excl = bw / 2 + guard
+        occupied = sorted(self.occupied_freqs())
+
+        if not occupied:
+            return preferred
+
+        nearest = min(abs(preferred - f) for f in occupied)
+        if nearest >= half_excl * 2:
+            return preferred
+
+        zones = sorted((f - half_excl, f + half_excl) for f in occupied)
+        merged = [list(zones[0])]
+        for start, end in zones[1:]:
+            if start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+
+        # Phase 1: between-signal gaps only
+        gaps: list[tuple[float, float]] = []
+        for i in range(len(merged) - 1):
+            gap_lo = merged[i][1]
+            gap_hi = merged[i + 1][0]
+            if gap_hi - gap_lo >= bw:
+                center = (gap_lo + gap_hi) / 2
+                gaps.append((center, gap_hi - gap_lo))
+
+        if gaps:
+            gaps.sort(key=lambda g: (abs(g[0] - preferred), -g[1]))
+            return int(round(gaps[0][0]))
+
+        # Phase 2: scan outward from preferred
+        scan_lo = lo + _SLOT_MARGIN
+        scan_hi = hi - _SLOT_MARGIN
+        min_clear = half_excl * 2
+        for offset in range(0, max(preferred - scan_lo, scan_hi - preferred) + 1,
+                            _SLOT_STEP):
+            for pos in (preferred + offset, preferred - offset):
+                if scan_lo <= pos <= scan_hi:
+                    if all(abs(pos - f) >= min_clear for f in occupied):
+                        return pos
+
+        return preferred
+
 
 @dataclass
 class DecodeRow:
@@ -114,6 +206,7 @@ class RadioEngine(QObject):
     txMessagesChanged = Signal(object, int)   # list[str], next idx
     sequencerState = Signal(object)       # dict
     freqChanged = Signal(int, int)        # rx audio, tx audio
+    slotOccupied = Signal(list)           # list[float] occupied audio freqs
     rigState = Signal(bool, float, str)   # connected, dial Hz, mode
     rigMeters = Signal(object)            # dict from RigController.meters
     bandChanged = Signal(str)             # band followed the rig dial
@@ -175,6 +268,8 @@ class RadioEngine(QObject):
         self._rig_dev_ready = False   # is the managed rig's device present?
         self._rig_waiting = False     # currently waiting for a device to appear
         self.monitoring = True
+        self._slot_tracker = AutoSlotTracker()
+        self._slot_tracker.set_keep(cfg.auto_slot_keep)
 
         # wiring
         self.decoder.decoded.connect(self._on_decoded)
@@ -285,6 +380,8 @@ class RadioEngine(QObject):
         self.halt_tx()
         self.mode = mode
         self.cfg.mode = mode
+        self._slot_tracker.clear()
+        self.slotOccupied.emit([])
         # If the current band has no standard dial for the new mode (e.g. FT4
         # on 160m), move to the first band that does rather than leaving the
         # dial stranded on the old mode's frequency.
@@ -309,6 +406,8 @@ class RadioEngine(QObject):
         logger.info("band change %s -> %s", self.band, band)
         self.band = band
         self.cfg.band = band
+        self._slot_tracker.clear()
+        self.slotOccupied.emit([])
         dial = bands.dial_for(band, self.mode)
         if dial is None:
             self.statusMessage.emit(f"{self.mode} has no standard freq on {band}")
@@ -323,7 +422,7 @@ class RadioEngine(QObject):
         self.statusMessage.emit(f"{band}  {self.dial_hz/1e6:.6f} MHz")
 
     def set_rx_freq(self, hz: int) -> None:
-        hz = int(max(200, min(4000, hz)))
+        hz = int(max(200, min(3000, hz)))
         self.rx_freq = hz
         self.cfg.rx_freq = hz
         if self.cfg.lock_tx_rx and not self.cfg.hold_tx_freq:
@@ -332,7 +431,7 @@ class RadioEngine(QObject):
         self.freqChanged.emit(self.rx_freq, self.tx_freq)
 
     def set_tx_freq(self, hz: int) -> None:
-        hz = int(max(200, min(4000, hz)))
+        hz = int(max(200, min(3000, hz)))
         self.tx_freq = hz
         self.cfg.tx_freq = hz
         self.freqChanged.emit(self.rx_freq, self.tx_freq)
@@ -389,8 +488,36 @@ class RadioEngine(QObject):
             self.capture = None
         self.statusMessage.emit("monitoring" if on else "monitor off")
 
+    def find_free_slot(self) -> int:
+        lo, hi = self._decode_window()
+        return self._slot_tracker.find_free(
+            self.mode, preferred=self.rx_freq,
+            lo=int(lo), hi=int(hi),
+            guard=self.cfg.auto_slot_guard)
+
+    def auto_find_slot(self) -> None:
+        if self.mode not in _SLOT_BW:
+            return
+        if self.seq.in_qso:
+            return
+        lo, hi = self._decode_window()
+        free = self._slot_tracker.find_free(
+            self.mode, preferred=self.rx_freq,
+            lo=int(lo), hi=int(hi),
+            guard=self.cfg.auto_slot_guard)
+        if free != self.rx_freq:
+            logger.info("auto-slot: %d Hz -> %d Hz", self.rx_freq, free)
+            self.rx_freq = free
+            self.cfg.rx_freq = free
+            self.tx_freq = free
+            self.cfg.tx_freq = free
+            self.freqChanged.emit(self.rx_freq, self.tx_freq)
+            self.statusMessage.emit(f"auto-slot: {free} Hz")
+
     def start_cq(self) -> None:
         self.seq.start_cq()
+        if self.cfg.auto_slot:
+            self.auto_find_slot()
         self._emit_tx_messages()
         self._emit_seq_state()
 
@@ -555,6 +682,10 @@ class RadioEngine(QObject):
             self._cur_cycle = cycle
             self.newCycle.emit(cycle)
             self._prune(cycle)
+            self._slot_tracker.prune(cycle)
+            if (self.cfg.auto_slot and self.cfg.auto_slot_recheck
+                    and self.seq.calling_cq and not self.seq.in_qso):
+                self.auto_find_slot()
             self._report_status()
         self.cycleTick.emit(min(1.0, t / P), cycle)
 
@@ -693,12 +824,14 @@ class RadioEngine(QObject):
         if rows:
             self.decodesReady.emit(rows)
             for row in rows:
+                self._slot_tracker.feed(cycle, row.freq_audio)
                 self.reporter.report_decode(row)
                 self.psk.report_decode(row)
                 self._log_spot(row)
                 self._maybe_alert(row)
                 self._auto_sequence(row)
                 self.plugins.dispatch("on_decode", row)
+            self.slotOccupied.emit(self._slot_tracker.occupied_freqs())
         self._pump_jobs()
 
     def _make_row(self, r, cycle: int, cstart: float, worked: set,
@@ -1044,14 +1177,16 @@ class RadioEngine(QObject):
     def _emit_spectrum(self) -> None:
         if not self.capture:
             return
-        raw = self.capture.latest(8192 / self.capture.fs)
+        raw = self.capture.latest(8192 / ft8lib.SAMPLE_RATE)
         if raw is None or len(raw) < 256:
             return
-        n = 1 << int(np.floor(np.log2(len(raw))))
-        x = raw[-n:] * np.hanning(n)
+        from .audio import _resample
+        audio = _resample(raw, self.capture.fs, ft8lib.SAMPLE_RATE)
+        n = 1 << int(np.floor(np.log2(len(audio))))
+        x = audio[-n:] * np.hanning(n)
         mag = np.abs(np.fft.rfft(x)) + 1e-9
         db = 20.0 * np.log10(mag)
-        self.spectrum.emit(db.astype(np.float32), self.capture.fs / n)
+        self.spectrum.emit(db.astype(np.float32), ft8lib.SAMPLE_RATE / n)
 
     # ------------------------------------------------------------------ #
     # emitters

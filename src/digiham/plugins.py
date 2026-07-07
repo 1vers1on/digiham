@@ -368,6 +368,8 @@ class PluginManager:
 
     def unload(self) -> None:
         for lp in self.plugins:
+            mod_name = f"digiham_plugin_{lp.source.stem}"
+            sys.modules.pop(mod_name, None)
             try:
                 lp.instance.on_unload()
             except Exception:

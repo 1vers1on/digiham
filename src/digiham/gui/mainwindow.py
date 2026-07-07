@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         decode_split.setSizes([640, 360])
         left.addWidget(decode_split, 3)
 
-        self.waterfall = Waterfall(fmax=3600)
+        self.waterfall = Waterfall(fmax=3200)
         left.addWidget(self.waterfall, 2)
 
         left.addLayout(self._build_progress())
@@ -161,6 +161,7 @@ class MainWindow(QMainWindow):
         sc("Ctrl+L", self.engine.log_current_qso)            # log current QSO
         sc("Alt+Up", lambda: self._nudge_rx(1))
         sc("Alt+Down", lambda: self._nudge_rx(-1))
+        sc("Ctrl+F", self._find_slot)
 
     def _nudge_rx(self, direction: int) -> None:
         self.engine.set_rx_freq(self.engine.rx_freq + direction * 10)
@@ -273,12 +274,12 @@ class MainWindow(QMainWindow):
         fr = QGroupBox("Frequencies (audio Hz)")
         g = QGridLayout(fr)
         g.addWidget(QLabel("Rx"), 0, 0)
-        self.rx_spin = QSpinBox(); self.rx_spin.setRange(200, 4000)
+        self.rx_spin = QSpinBox(); self.rx_spin.setRange(200, 3000)
         self.rx_spin.setValue(self.engine.rx_freq)
         self.rx_spin.valueChanged.connect(self.engine.set_rx_freq)
         g.addWidget(self.rx_spin, 0, 1)
         g.addWidget(QLabel("Tx"), 1, 0)
-        self.tx_spin = QSpinBox(); self.tx_spin.setRange(200, 4000)
+        self.tx_spin = QSpinBox(); self.tx_spin.setRange(200, 3000)
         self.tx_spin.setValue(self.engine.tx_freq)
         self.tx_spin.valueChanged.connect(self.engine.set_tx_freq)
         g.addWidget(self.tx_spin, 1, 1)
@@ -290,6 +291,10 @@ class MainWindow(QMainWindow):
         self.lock_chk.setChecked(self.cfg.lock_tx_rx)
         self.lock_chk.toggled.connect(self._set_lock)
         g.addWidget(self.lock_chk, 2, 1)
+        self.findslot_btn = QPushButton("Find Slot")
+        self.findslot_btn.setToolTip("Move Rx/Tx to a free frequency slot")
+        self.findslot_btn.clicked.connect(self._find_slot)
+        g.addWidget(self.findslot_btn, 3, 0, 1, 2)
         lay.addWidget(fr)
 
         # tx messages
@@ -360,21 +365,26 @@ class MainWindow(QMainWindow):
         self.callfirst_chk.setChecked(self.cfg.call_first)
         self.callfirst_chk.toggled.connect(lambda v: self._set_cfg("call_first", v))
         g.addWidget(self.callfirst_chk, 2, 0)
+        self.autoslot_chk = QCheckBox("Auto Slot")
+        self.autoslot_chk.setChecked(self.cfg.auto_slot)
+        self.autoslot_chk.setToolTip("Auto-find a free frequency slot when calling CQ")
+        self.autoslot_chk.toggled.connect(lambda v: self._set_cfg("auto_slot", v))
+        g.addWidget(self.autoslot_chk, 2, 1)
         self.txodd_chk = QCheckBox("Tx Odd/2nd")
         self.txodd_chk.setChecked(self.cfg.tx_odd)
         self.txodd_chk.toggled.connect(self.engine.set_tx_odd)
-        g.addWidget(self.txodd_chk, 2, 1)
+        g.addWidget(self.txodd_chk, 3, 0)
         self.tune_btn = QPushButton("Tune")
         self.tune_btn.setObjectName("txButton")
         self.tune_btn.setCheckable(True)
         self.tune_btn.setToolTip("Transmit a steady carrier for ATU / amp tuning")
         self.tune_btn.toggled.connect(self._toggle_tune)
-        g.addWidget(self.tune_btn, 3, 0)
+        g.addWidget(self.tune_btn, 4, 0)
         self.hidework_chk = QCheckBox("Hide B4")
         self.hidework_chk.setToolTip("Hide stations already worked from Band Activity")
         self.hidework_chk.setChecked(self.cfg.hide_worked)
         self.hidework_chk.toggled.connect(lambda v: self._set_cfg("hide_worked", v))
-        g.addWidget(self.hidework_chk, 3, 1)
+        g.addWidget(self.hidework_chk, 4, 1)
         lay.addWidget(oc)
 
         # free text
@@ -413,6 +423,7 @@ class MainWindow(QMainWindow):
         e.rigMeters.connect(self._on_rig_meters)
         e.bandChanged.connect(self._on_band_followed)
         e.qsoLogged.connect(self._on_qso_logged)
+        e.slotOccupied.connect(self.waterfall.set_occupied)
 
     def _apply_theme_colors(self) -> None:
         """Re-apply colours to the few widgets styled once at construction so a
@@ -654,6 +665,9 @@ class MainWindow(QMainWindow):
         if on:
             self.engine.set_rx_freq(self.engine.rx_freq)
 
+    def _find_slot(self) -> None:
+        self.engine.auto_find_slot()
+
     def _tx_now(self, idx: int) -> None:
         self.engine.select_tx(idx)
         if not self.tx_btn.isChecked():
@@ -700,6 +714,7 @@ class MainWindow(QMainWindow):
             self._apply_visual_config()
             self.autoseq_chk.setChecked(new.auto_seq)
             self.callfirst_chk.setChecked(new.call_first)
+            self.autoslot_chk.setChecked(new.auto_slot)
             self.hidework_chk.setChecked(new.hide_worked)
             if audio_changed:
                 self.engine.restart_audio()
@@ -758,7 +773,8 @@ class MainWindow(QMainWindow):
             "auto-sequencing, DXCC awareness and ADIF logging.</p>"
             "<p>Built on ft8lib, Hamlib rigctld and PySide6.</p>"
             "<p style='color:#888'><b>Shortcuts:</b> Esc halt · Ctrl+E enable Tx · "
-            "Ctrl+T tune · Ctrl+R CQ · Ctrl+L log · Alt+↑/↓ nudge Rx</p>")
+            "Ctrl+T tune · Ctrl+R CQ · Ctrl+L log · Ctrl+F find slot · "
+            "Alt+↑/↓ nudge Rx</p>")
 
     def _first_run_hint(self) -> None:
         QMessageBox.information(

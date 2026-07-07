@@ -4,7 +4,7 @@
 ; setup.exe with Start-Menu and optional desktop shortcuts and an uninstaller.
 ;
 ; Build (from the repo root, after running PyInstaller):
-;   iscc /DMyAppVersion=1.0.2 packaging\windows\digiham.iss
+;   iscc /DMyAppVersion=1.1.0 packaging\windows\digiham.iss
 ; The version defaults to 0.0.0 if not passed.
 
 #ifndef MyAppVersion

@@ -101,7 +101,7 @@ class Config:
     # --- Decoding --------------------------------------------------------
     decode_depth: int = 3
     freq_min: int = 200
-    freq_max: int = 3500
+    freq_max: int = 3000
     decode_dxcall_ap: bool = True  # feed DX call to decoder for a-priori digs
 
     # --- Frequencies (audio Hz within the passband) ----------------------
@@ -111,6 +111,10 @@ class Config:
     hold_tx_freq: bool = False
 
     # --- Behaviour -------------------------------------------------------
+    auto_slot: bool = True         # auto-find a free freq slot when calling CQ
+    auto_slot_guard: int = 10      # Hz guard band around each decoded signal
+    auto_slot_keep: int = 2        # how many past cycles of decodes to keep for slot finding
+    auto_slot_recheck: bool = True  # re-check slot each cycle while CQing
     auto_seq: bool = True          # run the QSO state machine automatically
     call_first: bool = False       # answer the first caller after a CQ
     auto_log: bool = True          # log automatically on RR73/73

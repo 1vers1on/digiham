@@ -106,6 +106,7 @@ class Waterfall(QWidget):
         self._rx = 1500
         self._tx = 1500
         self._bw_hz = BANDWIDTH_HZ["FT8"]
+        self._occupied: list[float] = []
         self._wf: np.ndarray | None = None      # (rows, W, 3) uint8
         self._spec_disp = np.zeros(1)           # last normalised row for the curve
 
@@ -196,6 +197,10 @@ class Waterfall(QWidget):
         self._rx, self._tx = int(rx), int(tx)
         self.update()
 
+    def set_occupied(self, freqs: list[float]) -> None:
+        self._occupied = freqs
+        self.update()
+
     # -- data ------------------------------------------------------------
 
     def push_spectrum(self, db: np.ndarray, bin_hz: float) -> None:
@@ -280,6 +285,7 @@ class Waterfall(QWidget):
         # cursors — a shaded passband like WSJT-X, not just a bare line
         self._draw_cursor(p, self._rx, PALETTE["green"], "Rx", spec_top)
         self._draw_cursor(p, self._tx, PALETTE["red"], "Tx", spec_top)
+        self._draw_occupied(p, spec_top)
         p.end()
 
     def _draw_cursor(self, p: QPainter, hz: int, color: str, label: str, top: int) -> None:
@@ -306,6 +312,20 @@ class Waterfall(QWidget):
 
         p.setPen(QColor(color))
         p.drawText(int(left_x) + 3, top + 12, label)
+
+    def _draw_occupied(self, p: QPainter, top: int) -> None:
+        if not self._occupied:
+            return
+        bottom = self.height() - self.AXIS_H
+        half_px = (self._bw_hz / 2.0) / self.fmax * self.width()
+        color = QColor(PALETTE.get("amber", "#ff9800"))
+        color.setAlpha(20)
+        pen = QPen(QColor(PALETTE.get("amber", "#ff9800")), 1)
+        pen.setStyle(Qt.PenStyle.DotLine)
+        p.setPen(pen)
+        for freq in self._occupied:
+            cx = self._x_for_hz(freq)
+            p.fillRect(QRectF(cx - half_px, top, 2 * half_px, bottom - top), color)
 
     # -- interaction -----------------------------------------------------
 
